@@ -6,16 +6,31 @@ from typing import TypedDict, List, Dict, Any
 from langgraph.graph import StateGraph, START, END
 from langchain_openai import AzureChatOpenAI
 from langchain_core.messages import SystemMessage, HumanMessage
+from pydantic import BaseModel, Field
 import io
 
-# Import openpyxl styles for professional Excel formatting
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 
 # Load environment variables from .env
 load_dotenv()
 
 # ==========================================
-# 1. LANGGRAPH STATE DEFINITION
+# 1. PYDANTIC SCHEMAS (STRUCTURED OUTPUT)
+# ==========================================
+class FinalDriver(BaseModel):
+    name: str = Field(description="Name of the variance driver")
+    variance: str = Field(description="Variance amount (e.g., '5.20M')")
+
+class CategorySummary(BaseModel):
+    primary_category: str = Field(description="Name of the primary category")
+    drivers: List[FinalDriver] = Field(description="Top reasons/drivers from the final level")
+
+class VarianceReport(BaseModel):
+    overall_conclusion: str = Field(description="1-2 sentence overall executive conclusion")
+    category_breakdowns: List[CategorySummary] = Field(description="Breakdown of drivers per primary category")
+
+# ==========================================
+# 2. LANGGRAPH STATE DEFINITION
 # ==========================================
 class AgentState(TypedDict):
     df: pd.DataFrame
@@ -25,10 +40,10 @@ class AgentState(TypedDict):
     base_scenario: str
     compare_scenario: str
     path_trace: List[str]
-    final_summary: str
+    final_summary: Any  # Changed to Any to handle either the Dict or an Error string
 
 # ==========================================
-# 2. LANGGRAPH NODES
+# 3. LANGGRAPH NODES
 # ==========================================
 def calculate_variance_node(state: AgentState) -> Dict[str, Any]:
     """Branched Drill-Down: Loops through primary categories and drills down to the final reason."""
@@ -41,7 +56,6 @@ def calculate_variance_node(state: AgentState) -> Dict[str, Any]:
     if not hierarchy:
         return {"path_trace": ["⚠️ Error: No hierarchy columns selected."]}
         
-    # Determine the target column for calculation
     if has_var:
         target_col = state.get("variance_col")
         if target_col not in df.columns:
@@ -52,21 +66,16 @@ def calculate_variance_node(state: AgentState) -> Dict[str, Any]:
         if base_col not in df.columns or comp_col not in df.columns:
              return {"path_trace": ["⚠️ Error: Scenario columns not found."]}
         
-        # Calculate dynamic variance
         target_col = "Calculated_Variance"
         df[target_col] = df[base_col] - df[comp_col]
 
-    # Calculate global total variance in Millions
     total_variance = df[target_col].fillna(0).sum()
     path_trace.append(f"**Overall Total Variance: {total_variance / 1e6:,.2f}M**\n")
 
     first_level = hierarchy[0]
-    
-    # Get the Top 5 primary categories from the first level of the hierarchy
     first_level_grouped = df.groupby(first_level)[target_col].sum()
     top_primary_categories = first_level_grouped.reindex(first_level_grouped.abs().sort_values(ascending=False).index).head(5)
 
-    # Loop through each primary category
     for primary_cat, primary_val in top_primary_categories.items():
         path_trace.append(f"=========================================")
         path_trace.append(f"🔹 **Primary Category: '{primary_cat}'** (Total: {primary_val / 1e6:,.2f}M)")
@@ -74,14 +83,12 @@ def calculate_variance_node(state: AgentState) -> Dict[str, Any]:
         
         current_df = df[df[first_level] == primary_cat]
         
-        # If there is only one level selected, just list its top drivers
         if len(hierarchy) == 1:
              path_trace.append(f"--- **FINAL LEVEL: Top 5 Reasons in '{first_level}'** ---")
              for idx, (name, val) in enumerate(top_primary_categories.items(), 1):
                  path_trace.append(f"  {idx}. '{name}': {val / 1e6:,.2f}M")
              continue
 
-        # Drill down through the REMAINING levels of the hierarchy
         for i, level in enumerate(hierarchy[1:]):
             is_last_level = (i == len(hierarchy[1:]) - 1)
             
@@ -93,10 +100,8 @@ def calculate_variance_node(state: AgentState) -> Dict[str, Any]:
             if grouped.empty or grouped.isna().all():
                 break
                 
-            # Get Top 5 drivers for this specific branch
             top_5 = grouped.reindex(grouped.abs().sort_values(ascending=False).index).head(5)
             
-            # Explicitly flag the final level for the LLM to extract
             if is_last_level:
                 path_trace.append(f"--- **FINAL LEVEL: Top 5 Reasons in '{level}' (Inside {primary_cat})** ---")
             else:
@@ -106,11 +111,9 @@ def calculate_variance_node(state: AgentState) -> Dict[str, Any]:
                 path_trace.append(f"  {idx}. '{name}': {val / 1e6:,.2f}M")
                 
             if is_last_level:
-                break # We reached the end, no need to filter further
+                break 
                 
-            # Find the #1 node to continue the drill-down
             max_driver = top_5.index[0]
-            
             if pd.isna(max_driver):
                 break
                 
@@ -122,7 +125,7 @@ def calculate_variance_node(state: AgentState) -> Dict[str, Any]:
     return {"path_trace": path_trace}
 
 def synthesize_insight_node(state: AgentState) -> Dict[str, Any]:
-    """Azure OpenAI generates an executive summary focusing on the final reasons."""
+    """Azure OpenAI uses structured output to return a clean JSON object."""
     
     if state["path_trace"] and "⚠️ Error" in state["path_trace"][0]:
         return {"final_summary": "Analysis aborted due to invalid data configuration."}
@@ -134,87 +137,94 @@ def synthesize_insight_node(state: AgentState) -> Dict[str, Any]:
         api_version=os.getenv("AZURE_OPENAI_API_VERSION")
     )
 
-    # Updated Prompt: Force the LLM to list the final level top 5 for each primary category
+    # Bind the Pydantic schema to the LLM so it strictly outputs JSON
+    structured_llm = llm.with_structured_output(VarianceReport)
+
     system_prompt = (
         "You are a strict, professional financial data analyst. You are reviewing a branched variance "
-        "analysis trace. All values are in Millions (M).\n\n"
-        "Provide an Executive Summary formatted EXACTLY as follows:\n"
-        "1. A brief 1-2 sentence overall conclusion regarding the total variance.\n"
-        "2. A bulleted breakdown for each 'Primary Category' analyzed. Under each Primary Category, "
-        "explicitly list the Top 5 reasons/drivers specifically from the 'FINAL LEVEL' identified in the trace, "
-        "along with their exact variance amounts.\n\n"
-        "Do not add conversational filler. Keep it structured and easy for an executive to read."
+        "analysis trace. Extract the requested data into the provided structured schema."
     )
     
     trace_text = "\n".join(state["path_trace"])
-    
     messages = [
         SystemMessage(content=system_prompt),
         HumanMessage(content=f"Raw Data Trace:\n{trace_text}")
     ]
     
-    response = llm.invoke(messages)
-    return {"final_summary": response.content}
+    response = structured_llm.invoke(messages)
+    
+    # Return as a dictionary so it can be easily stored in state and manipulated
+    return {"final_summary": response.model_dump()}
 
 # ==========================================
-# 3. EXCEL GENERATION UTILITY (openpyxl)
+# 4. DYNAMIC EXCEL GENERATION (from JSON)
 # ==========================================
-def generate_excel_report(summary: str, trace: List[str]) -> bytes:
-    """Formats the LLM summary and calculation trace into a clean Excel file using openpyxl."""
+def generate_excel_report(summary_data: dict, trace: List[str]) -> bytes:
+    """Dynamically builds an Excel file by iterating over the structured JSON dictionary."""
     output = io.BytesIO()
     
     with pd.ExcelWriter(output, engine='openpyxl') as writer:
-        # 1. Write the DataFrames to sheets
-        # Splitting the summary by newline helps it format as rows rather than one massive cell
-        summary_lines = [line for line in summary.split('\n') if line.strip() != ""]
-        summary_df = pd.DataFrame({"Executive Summary": summary_lines})
+        
+        # --- Sheet 1: Executive Summary (Dynamic from Dict) ---
+        summary_rows = []
+        summary_rows.append({"Category": "OVERALL CONCLUSION", "Driver": summary_data["overall_conclusion"], "Amount": ""})
+        summary_rows.append({"Category": "", "Driver": "", "Amount": ""}) # Spacer
+        
+        for cat in summary_data["category_breakdowns"]:
+            summary_rows.append({"Category": f"[{cat['primary_category']}]", "Driver": "", "Amount": ""})
+            for driver in cat["drivers"]:
+                summary_rows.append({"Category": "", "Driver": driver["name"], "Amount": driver["variance"]})
+        
+        summary_df = pd.DataFrame(summary_rows)
         summary_df.to_excel(writer, sheet_name="Executive Summary", index=False)
         
+        # --- Sheet 2: Mathematical Trace ---
         trace_df = pd.DataFrame({"Drill-Down Trace Details": trace})
         trace_df.to_excel(writer, sheet_name="Variance Details", index=False)
         
-        # 2. Define Professional Styles
-        # Dark blue background for headers
+        # --- Styling ---
+        workbook = writer.book
         header_fill = PatternFill(start_color="1F4E78", end_color="1F4E78", fill_type="solid")
-        # Bold white text for headers
         header_font = Font(color="FFFFFF", bold=True, size=12)
-        # Wrap text and align to the top-left for standard rows
         cell_alignment = Alignment(wrap_text=True, vertical="top", horizontal="left")
-        # Thin border around cells
         thin_border = Border(
-            left=Side(style='thin', color="CCCCCC"), 
-            right=Side(style='thin', color="CCCCCC"), 
-            top=Side(style='thin', color="CCCCCC"), 
-            bottom=Side(style='thin', color="CCCCCC")
+            left=Side(style='thin', color="CCCCCC"), right=Side(style='thin', color="CCCCCC"), 
+            top=Side(style='thin', color="CCCCCC"), bottom=Side(style='thin', color="CCCCCC")
         )
 
-        # 3. Apply Styles to Workbook
-        workbook = writer.book
+        # Style Sheet 1 (Summary)
+        ws1 = workbook["Executive Summary"]
+        for col in range(1, 4):
+            cell = ws1.cell(row=1, column=col)
+            cell.fill = header_fill
+            cell.font = header_font
+            cell.alignment = Alignment(horizontal="center", vertical="center")
+            cell.border = thin_border
+            
+        for row in range(2, ws1.max_row + 1):
+            for col in range(1, 4):
+                ws1.cell(row=row, column=col).alignment = cell_alignment
+                
+        ws1.column_dimensions['A'].width = 30
+        ws1.column_dimensions['B'].width = 80
+        ws1.column_dimensions['C'].width = 15
+
+        # Style Sheet 2 (Trace)
+        ws2 = workbook["Variance Details"]
+        cell = ws2.cell(row=1, column=1)
+        cell.fill = header_fill
+        cell.font = header_font
+        cell.alignment = Alignment(horizontal="center", vertical="center")
+        cell.border = thin_border
         
-        for sheet_name in workbook.sheetnames:
-            worksheet = workbook[sheet_name]
-            
-            # Format Headers (Row 1)
-            for col in range(1, worksheet.max_column + 1):
-                cell = worksheet.cell(row=1, column=col)
-                cell.fill = header_fill
-                cell.font = header_font
-                cell.alignment = Alignment(horizontal="center", vertical="center")
-                cell.border = thin_border
-            
-            # Format Content Rows (Row 2 onwards)
-            for row in range(2, worksheet.max_row + 1):
-                for col in range(1, worksheet.max_column + 1):
-                    cell = worksheet.cell(row=row, column=col)
-                    cell.alignment = cell_alignment
-            
-            # Expand Column A so text is readable
-            worksheet.column_dimensions['A'].width = 110
+        for row in range(2, ws2.max_row + 1):
+            ws2.cell(row=row, column=1).alignment = cell_alignment
+        ws2.column_dimensions['A'].width = 110
             
     return output.getvalue()
 
 # ==========================================
-# 4. GRAPH COMPILATION
+# 5. GRAPH COMPILATION
 # ==========================================
 def build_graph():
     workflow = StateGraph(AgentState)
@@ -228,7 +238,7 @@ def build_graph():
     return workflow.compile()
 
 # ==========================================
-# 5. STREAMLIT UI (SIDEBAR CONFIG)
+# 6. STREAMLIT UI (DYNAMIC RENDERING)
 # ==========================================
 st.set_page_config(page_title="Branched Variance Analyzer", layout="wide")
 
@@ -275,8 +285,7 @@ with st.sidebar:
             hierarchy = st.multiselect(
                 "Hierarchy Flow (Left to Right)", 
                 options=all_cols, 
-                default=cat_cols,
-                help="The bot will group by the first column, drill through the middle, and report the Top 5 reasons from the LAST column."
+                default=cat_cols
             )
 
             run_analysis = st.button("Generate Commentary", type="primary", use_container_width=True)
@@ -314,11 +323,21 @@ if uploaded_file is not None and 'df' in locals():
                 st.markdown("---")
                 st.markdown("### 🤖 Executive Summary")
                 
-                # Render the LLM output with success styling
-                if "aborted" in result["final_summary"].lower() or "error" in result["final_summary"].lower():
-                    st.error(result["final_summary"])
+                # Check if the output is a string (Error) or Dict (Success)
+                summary_data = result["final_summary"]
+                
+                if isinstance(summary_data, str):
+                    st.error(summary_data)
                 else:
-                    st.success(result["final_summary"])
+                    # DYNAMIC UI RENDERING FROM DICTIONARY
+                    st.success(summary_data["overall_conclusion"])
+                    st.write("")
+                    
+                    for cat in summary_data["category_breakdowns"]:
+                        st.markdown(f"**🔹 {cat['primary_category']}**")
+                        for driver in cat["drivers"]:
+                            st.markdown(f"- {driver['name']}: `{driver['variance']}`")
+                        st.write("")
                 
                 st.markdown("### 🧮 Branched Drill-Down Trace")
                 for step in result["path_trace"]:
@@ -335,8 +354,8 @@ if uploaded_file is not None and 'df' in locals():
                         
                 # Excel Download Button
                 st.markdown("---")
-                if not ("aborted" in result["final_summary"].lower() or "error" in result["final_summary"].lower()):
-                    excel_data = generate_excel_report(result["final_summary"], result["path_trace"])
+                if not isinstance(summary_data, str):
+                    excel_data = generate_excel_report(summary_data, result["path_trace"])
                     
                     st.download_button(
                         label="📥 Download Professional Excel Report (.xlsx)",
