@@ -8,6 +8,9 @@ from langchain_openai import AzureChatOpenAI
 from langchain_core.messages import SystemMessage, HumanMessage
 import io
 
+# Import openpyxl styles for professional Excel formatting
+from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+
 # Load environment variables from .env
 load_dotenv()
 
@@ -63,7 +66,7 @@ def calculate_variance_node(state: AgentState) -> Dict[str, Any]:
     first_level_grouped = df.groupby(first_level)[target_col].sum()
     top_primary_categories = first_level_grouped.reindex(first_level_grouped.abs().sort_values(ascending=False).index).head(5)
 
-    # Loop through each primary category (e.g., Region A, then Region B)
+    # Loop through each primary category
     for primary_cat, primary_val in top_primary_categories.items():
         path_trace.append(f"=========================================")
         path_trace.append(f"🔹 **Primary Category: '{primary_cat}'** (Total: {primary_val / 1e6:,.2f}M)")
@@ -154,25 +157,59 @@ def synthesize_insight_node(state: AgentState) -> Dict[str, Any]:
     return {"final_summary": response.content}
 
 # ==========================================
-# 3. EXCEL GENERATION UTILITY
+# 3. EXCEL GENERATION UTILITY (openpyxl)
 # ==========================================
 def generate_excel_report(summary: str, trace: List[str]) -> bytes:
-    """Formats the LLM summary and calculation trace into a clean Excel file."""
+    """Formats the LLM summary and calculation trace into a clean Excel file using openpyxl."""
     output = io.BytesIO()
     
-    with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-        # Sheet 1: Executive Summary
-        summary_df = pd.DataFrame({"Executive Summary": summary.split('\n')})
+    with pd.ExcelWriter(output, engine='openpyxl') as writer:
+        # 1. Write the DataFrames to sheets
+        # Splitting the summary by newline helps it format as rows rather than one massive cell
+        summary_lines = [line for line in summary.split('\n') if line.strip() != ""]
+        summary_df = pd.DataFrame({"Executive Summary": summary_lines})
         summary_df.to_excel(writer, sheet_name="Executive Summary", index=False)
         
-        # Sheet 2: Mathematical Trace
         trace_df = pd.DataFrame({"Drill-Down Trace Details": trace})
         trace_df.to_excel(writer, sheet_name="Variance Details", index=False)
         
-        # Auto-adjust column width for readability
-        for sheet_name in writer.sheets:
-            worksheet = writer.sheets[sheet_name]
-            worksheet.set_column('A:A', 120)  # Make column A wide enough to read the text
+        # 2. Define Professional Styles
+        # Dark blue background for headers
+        header_fill = PatternFill(start_color="1F4E78", end_color="1F4E78", fill_type="solid")
+        # Bold white text for headers
+        header_font = Font(color="FFFFFF", bold=True, size=12)
+        # Wrap text and align to the top-left for standard rows
+        cell_alignment = Alignment(wrap_text=True, vertical="top", horizontal="left")
+        # Thin border around cells
+        thin_border = Border(
+            left=Side(style='thin', color="CCCCCC"), 
+            right=Side(style='thin', color="CCCCCC"), 
+            top=Side(style='thin', color="CCCCCC"), 
+            bottom=Side(style='thin', color="CCCCCC")
+        )
+
+        # 3. Apply Styles to Workbook
+        workbook = writer.book
+        
+        for sheet_name in workbook.sheetnames:
+            worksheet = workbook[sheet_name]
+            
+            # Format Headers (Row 1)
+            for col in range(1, worksheet.max_column + 1):
+                cell = worksheet.cell(row=1, column=col)
+                cell.fill = header_fill
+                cell.font = header_font
+                cell.alignment = Alignment(horizontal="center", vertical="center")
+                cell.border = thin_border
+            
+            # Format Content Rows (Row 2 onwards)
+            for row in range(2, worksheet.max_row + 1):
+                for col in range(1, worksheet.max_column + 1):
+                    cell = worksheet.cell(row=row, column=col)
+                    cell.alignment = cell_alignment
+            
+            # Expand Column A so text is readable
+            worksheet.column_dimensions['A'].width = 110
             
     return output.getvalue()
 
@@ -295,14 +332,14 @@ if uploaded_file is not None and 'df' in locals():
                         st.write("") 
                     else:
                         st.text(step)
-                
-                # Render the Excel Download Button
+                        
+                # Excel Download Button
                 st.markdown("---")
                 if not ("aborted" in result["final_summary"].lower() or "error" in result["final_summary"].lower()):
                     excel_data = generate_excel_report(result["final_summary"], result["path_trace"])
                     
                     st.download_button(
-                        label="📥 Download Full Report (.xlsx)",
+                        label="📥 Download Professional Excel Report (.xlsx)",
                         data=excel_data,
                         file_name="Variance_Executive_Report.xlsx",
                         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
