@@ -1,6 +1,7 @@
 import streamlit as st
 import pandas as pd
 import os
+import re
 from dotenv import load_dotenv
 from typing import TypedDict, List, Dict, Any
 from langgraph.graph import StateGraph, START, END
@@ -10,6 +11,9 @@ from pydantic import BaseModel, Field
 import io
 
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+from pptx import Presentation
+from pptx.util import Inches, Pt
+from pptx.dml.color import RGBColor
 
 # Load environment variables from .env
 load_dotenv()
@@ -18,15 +22,16 @@ load_dotenv()
 # 1. PYDANTIC SCHEMAS (STRUCTURED OUTPUT)
 # ==========================================
 class FinalDriver(BaseModel):
-    name: str = Field(description="Name of the variance driver")
+    name: str = Field(description="Name of the variance driver (Plain text, no markdown)")
     variance: str = Field(description="Variance amount (e.g., '5.20M')")
 
 class CategorySummary(BaseModel):
-    primary_category: str = Field(description="Name of the primary category")
+    primary_category: str = Field(description="Name of the primary category (Plain text)")
     drivers: List[FinalDriver] = Field(description="Top reasons/drivers from the final level")
 
 class VarianceReport(BaseModel):
-    overall_conclusion: str = Field(description="1-2 sentence overall executive conclusion")
+    ui_markdown_report: str = Field(description="The complete executive summary formatted as a Markdown string for the web UI.")
+    overall_conclusion: str = Field(description="1-2 sentence overall executive conclusion (Plain text, no markdown)")
     category_breakdowns: List[CategorySummary] = Field(description="Breakdown of drivers per primary category")
 
 # ==========================================
@@ -40,7 +45,7 @@ class AgentState(TypedDict):
     base_scenario: str
     compare_scenario: str
     path_trace: List[str]
-    final_summary: Any  # Changed to Any to handle either the Dict or an Error string
+    final_summary: Any  
 
 # ==========================================
 # 3. LANGGRAPH NODES
@@ -96,7 +101,6 @@ def calculate_variance_node(state: AgentState) -> Dict[str, Any]:
                 break
                 
             grouped = current_df.groupby(level)[target_col].sum()
-            
             if grouped.empty or grouped.isna().all():
                 break
                 
@@ -125,7 +129,7 @@ def calculate_variance_node(state: AgentState) -> Dict[str, Any]:
     return {"path_trace": path_trace}
 
 def synthesize_insight_node(state: AgentState) -> Dict[str, Any]:
-    """Azure OpenAI uses structured output to return a clean JSON object."""
+    """Azure OpenAI uses structured output to return both a clean UI string and a JSON object."""
     
     if state["path_trace"] and "⚠️ Error" in state["path_trace"][0]:
         return {"final_summary": "Analysis aborted due to invalid data configuration."}
@@ -137,12 +141,15 @@ def synthesize_insight_node(state: AgentState) -> Dict[str, Any]:
         api_version=os.getenv("AZURE_OPENAI_API_VERSION")
     )
 
-    # Bind the Pydantic schema to the LLM so it strictly outputs JSON
     structured_llm = llm.with_structured_output(VarianceReport)
 
     system_prompt = (
         "You are a strict, professional financial data analyst. You are reviewing a branched variance "
-        "analysis trace. Extract the requested data into the provided structured schema."
+        "analysis trace. All values are in Millions (M).\n\n"
+        "Populate the JSON schema with pure text (no markdown asterisks or hashes in the drivers/categories).\n"
+        "HOWEVER, for the 'ui_markdown_report' field, generate a highly readable Markdown string exactly as follows:\n"
+        "1. A brief 1-2 sentence overall conclusion.\n"
+        "2. A bulleted breakdown for each 'Primary Category' analyzed, listing the Top 5 reasons/drivers."
     )
     
     trace_text = "\n".join(state["path_trace"])
@@ -152,75 +159,109 @@ def synthesize_insight_node(state: AgentState) -> Dict[str, Any]:
     ]
     
     response = structured_llm.invoke(messages)
-    
-    # Return as a dictionary so it can be easily stored in state and manipulated
     return {"final_summary": response.model_dump()}
 
 # ==========================================
-# 4. DYNAMIC EXCEL GENERATION (from JSON)
+# 4. REPORT GENERATION UTILITIES
 # ==========================================
-def generate_excel_report(summary_data: dict, trace: List[str]) -> bytes:
-    """Dynamically builds an Excel file by iterating over the structured JSON dictionary."""
+def clean_markdown(text: str) -> str:
+    """Strips Markdown symbols (*, #, _, =>) for clean Excel/PPT output."""
+    text = re.sub(r'[*#_]', '', text)
+    text = text.replace('=>', '->')
+    return text
+
+def generate_clean_excel(summary_data: dict, trace: List[str]) -> bytes:
+    """Generates an Excel file applying real formatting, completely avoiding raw markdown symbols."""
     output = io.BytesIO()
     
     with pd.ExcelWriter(output, engine='openpyxl') as writer:
-        
-        # --- Sheet 1: Executive Summary (Dynamic from Dict) ---
+        # Sheet 1: Structured Summary (Using the pure text JSON, NOT the markdown)
         summary_rows = []
         summary_rows.append({"Category": "OVERALL CONCLUSION", "Driver": summary_data["overall_conclusion"], "Amount": ""})
         summary_rows.append({"Category": "", "Driver": "", "Amount": ""}) # Spacer
         
         for cat in summary_data["category_breakdowns"]:
-            summary_rows.append({"Category": f"[{cat['primary_category']}]", "Driver": "", "Amount": ""})
+            summary_rows.append({"Category": cat['primary_category'], "Driver": "", "Amount": ""})
             for driver in cat["drivers"]:
                 summary_rows.append({"Category": "", "Driver": driver["name"], "Amount": driver["variance"]})
         
         summary_df = pd.DataFrame(summary_rows)
         summary_df.to_excel(writer, sheet_name="Executive Summary", index=False)
         
-        # --- Sheet 2: Mathematical Trace ---
-        trace_df = pd.DataFrame({"Drill-Down Trace Details": trace})
+        # Sheet 2: Mathematical Trace (Stripping markdown)
+        clean_trace = [clean_markdown(line) for line in trace]
+        trace_df = pd.DataFrame({"Calculation Trace": clean_trace})
         trace_df.to_excel(writer, sheet_name="Variance Details", index=False)
         
-        # --- Styling ---
+        # Apply Professional Styles
         workbook = writer.book
         header_fill = PatternFill(start_color="1F4E78", end_color="1F4E78", fill_type="solid")
         header_font = Font(color="FFFFFF", bold=True, size=12)
+        bold_font = Font(bold=True)
         cell_alignment = Alignment(wrap_text=True, vertical="top", horizontal="left")
-        thin_border = Border(
-            left=Side(style='thin', color="CCCCCC"), right=Side(style='thin', color="CCCCCC"), 
-            top=Side(style='thin', color="CCCCCC"), bottom=Side(style='thin', color="CCCCCC")
-        )
 
-        # Style Sheet 1 (Summary)
+        # Style Sheet 1
         ws1 = workbook["Executive Summary"]
         for col in range(1, 4):
             cell = ws1.cell(row=1, column=col)
             cell.fill = header_fill
             cell.font = header_font
             cell.alignment = Alignment(horizontal="center", vertical="center")
-            cell.border = thin_border
             
         for row in range(2, ws1.max_row + 1):
             for col in range(1, 4):
-                ws1.cell(row=row, column=col).alignment = cell_alignment
+                cell = ws1.cell(row=row, column=col)
+                cell.alignment = cell_alignment
+                # Make Primary Categories bold natively in Excel
+                if col == 1 and cell.value and cell.value != "OVERALL CONCLUSION":
+                    cell.font = bold_font
                 
-        ws1.column_dimensions['A'].width = 30
-        ws1.column_dimensions['B'].width = 80
+        ws1.column_dimensions['A'].width = 35
+        ws1.column_dimensions['B'].width = 60
         ws1.column_dimensions['C'].width = 15
 
-        # Style Sheet 2 (Trace)
+        # Style Sheet 2
         ws2 = workbook["Variance Details"]
-        cell = ws2.cell(row=1, column=1)
-        cell.fill = header_fill
-        cell.font = header_font
-        cell.alignment = Alignment(horizontal="center", vertical="center")
-        cell.border = thin_border
-        
+        ws2.cell(row=1, column=1).fill = header_fill
+        ws2.cell(row=1, column=1).font = header_font
         for row in range(2, ws2.max_row + 1):
             ws2.cell(row=row, column=1).alignment = cell_alignment
         ws2.column_dimensions['A'].width = 110
             
+    return output.getvalue()
+
+def generate_ppt_report(summary_data: dict) -> bytes:
+    """Generates a professional PowerPoint presentation from the structured JSON data."""
+    prs = Presentation()
+    
+    # 1. Title Slide
+    title_slide_layout = prs.slide_layouts[0]
+    slide = prs.slides.add_slide(title_slide_layout)
+    title = slide.shapes.title
+    subtitle = slide.placeholders[1]
+    title.text = "Root Cause Variance Analysis"
+    subtitle.text = "Automated Executive Briefing"
+    
+    # 2. Executive Summary Slide
+    bullet_slide_layout = prs.slide_layouts[1]
+    slide = prs.slides.add_slide(bullet_slide_layout)
+    slide.shapes.title.text = "Executive Conclusion"
+    tf = slide.shapes.placeholders[1].text_frame
+    tf.text = summary_data["overall_conclusion"]
+    
+    # 3. Dynamic Slides for each Primary Category
+    for cat in summary_data["category_breakdowns"]:
+        slide = prs.slides.add_slide(bullet_slide_layout)
+        slide.shapes.title.text = f"Key Drivers: {cat['primary_category']}"
+        tf = slide.shapes.placeholders[1].text_frame
+        
+        for driver in cat["drivers"]:
+            p = tf.add_paragraph()
+            p.text = f"{driver['name']}: {driver['variance']}"
+            p.level = 0
+            
+    output = io.BytesIO()
+    prs.save(output)
     return output.getvalue()
 
 # ==========================================
@@ -238,14 +279,13 @@ def build_graph():
     return workflow.compile()
 
 # ==========================================
-# 6. STREAMLIT UI (DYNAMIC RENDERING)
+# 6. STREAMLIT UI 
 # ==========================================
 st.set_page_config(page_title="Branched Variance Analyzer", layout="wide")
 
 st.title("Branched Root Cause Analyzer")
 st.write("Upload your dataset to generate a structured executive summary linking your primary categories directly to their root causes.")
 
-# SIDEBAR CONTROLS
 with st.sidebar:
     st.header("1. Upload Data")
     uploaded_file = st.file_uploader("Upload CSV/Excel", type=["csv", "xlsx"])
@@ -275,25 +315,20 @@ with st.sidebar:
                 variance_col = st.selectbox("Select Variance Column", num_cols, index=idx)
             else:
                 st.caption("Calculate: (Base - Compare)")
-                base_scenario = st.selectbox("Select Base Scenario (e.g. 2024_ACT)", num_cols)
-                compare_scenario = st.selectbox("Select Compare Scenario (e.g. 2025_FC2+10)", num_cols)
+                base_scenario = st.selectbox("Select Base Scenario", num_cols)
+                compare_scenario = st.selectbox("Select Compare Scenario", num_cols)
 
             st.header("3. Select Hierarchy")
             cat_cols = df.select_dtypes(include=['object', 'string', 'category']).columns.tolist()
             all_cols = df.columns.tolist()
             
-            hierarchy = st.multiselect(
-                "Hierarchy Flow (Left to Right)", 
-                options=all_cols, 
-                default=cat_cols
-            )
+            hierarchy = st.multiselect("Hierarchy Flow", options=all_cols, default=cat_cols)
 
             run_analysis = st.button("Generate Commentary", type="primary", use_container_width=True)
 
         except Exception as e:
             st.error(f"Error loading file: {e}")
 
-# MAIN PAGE DISPLAY
 if uploaded_file is not None and 'df' in locals():
     st.write("### Data Preview")
     st.dataframe(df.head(3))
@@ -323,21 +358,13 @@ if uploaded_file is not None and 'df' in locals():
                 st.markdown("---")
                 st.markdown("### 🤖 Executive Summary")
                 
-                # Check if the output is a string (Error) or Dict (Success)
                 summary_data = result["final_summary"]
                 
                 if isinstance(summary_data, str):
                     st.error(summary_data)
                 else:
-                    # DYNAMIC UI RENDERING FROM DICTIONARY
-                    st.success(summary_data["overall_conclusion"])
-                    st.write("")
-                    
-                    for cat in summary_data["category_breakdowns"]:
-                        st.markdown(f"**🔹 {cat['primary_category']}**")
-                        for driver in cat["drivers"]:
-                            st.markdown(f"- {driver['name']}: `{driver['variance']}`")
-                        st.write("")
+                    # Renders the exact markdown you liked for the UI
+                    st.success(summary_data["ui_markdown_report"])
                 
                 st.markdown("### 🧮 Branched Drill-Down Trace")
                 for step in result["path_trace"]:
@@ -352,15 +379,30 @@ if uploaded_file is not None and 'df' in locals():
                     else:
                         st.text(step)
                         
-                # Excel Download Button
+                # Download Buttons Layout
                 st.markdown("---")
                 if not isinstance(summary_data, str):
-                    excel_data = generate_excel_report(summary_data, result["path_trace"])
+                    st.write("### 📥 Export Reports")
                     
-                    st.download_button(
-                        label="📥 Download Professional Excel Report (.xlsx)",
-                        data=excel_data,
-                        file_name="Variance_Executive_Report.xlsx",
-                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                        type="primary"
-                    )
+                    # Create two columns for the buttons
+                    col1, col2 = st.columns(2)
+                    
+                    with col1:
+                        excel_data = generate_clean_excel(summary_data, result["path_trace"])
+                        st.download_button(
+                            label="📊 Download Clean Excel Report",
+                            data=excel_data,
+                            file_name="Variance_Executive_Report.xlsx",
+                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                            use_container_width=True
+                        )
+                        
+                    with col2:
+                        ppt_data = generate_ppt_report(summary_data)
+                        st.download_button(
+                            label="🖥️ Download PowerPoint Presentation",
+                            data=ppt_data,
+                            file_name="Variance_Executive_Briefing.pptx",
+                            mime="application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                            use_container_width=True
+                        )
