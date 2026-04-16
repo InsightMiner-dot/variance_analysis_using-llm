@@ -18,9 +18,9 @@ class AgentState(TypedDict):
     df: pd.DataFrame
     hierarchy_cols: List[str]
     has_variance_col: bool
-    variance_col: str       # Used if variance is pre-calculated
-    base_scenario: str      # Used if calculating variance
-    compare_scenario: str   # Used if calculating variance
+    variance_col: str
+    base_scenario: str
+    compare_scenario: str
     path_trace: List[str]
     final_summary: str
 
@@ -28,66 +28,84 @@ class AgentState(TypedDict):
 # 2. LANGGRAPH NODES
 # ==========================================
 def calculate_variance_node(state: AgentState) -> Dict[str, Any]:
-    """Deterministic Pandas calculation tracking the top drivers (Values in Millions)"""
+    """Branched Drill-Down: Loops through primary categories and drills into each."""
     df = state["df"].copy()
     hierarchy = state.get("hierarchy_cols", [])
     has_var = state.get("has_variance_col", True)
     
     path_trace = []
-    current_df = df.copy()
     
+    if not hierarchy:
+        return {"path_trace": ["⚠️ Error: No hierarchy columns selected."]}
+        
     # Determine the target column for calculation
     if has_var:
         target_col = state.get("variance_col")
-        if target_col not in current_df.columns:
+        if target_col not in df.columns:
             return {"path_trace": [f"⚠️ Error: Target column '{target_col}' not found."]}
     else:
         base_col = state.get("base_scenario")
         comp_col = state.get("compare_scenario")
-        if base_col not in current_df.columns or comp_col not in current_df.columns:
+        if base_col not in df.columns or comp_col not in df.columns:
              return {"path_trace": ["⚠️ Error: Scenario columns not found."]}
         
         # Calculate dynamic variance
         target_col = "Calculated_Variance"
-        current_df[target_col] = current_df[base_col] - current_df[comp_col]
+        df[target_col] = df[base_col] - df[comp_col]
 
-    # Calculate base total in Millions
-    total_variance = current_df[target_col].fillna(0).sum()
-    path_trace.append(f"**Total Variance: {total_variance / 1e6:,.2f}M**\n")
+    # Calculate global total variance in Millions
+    total_variance = df[target_col].fillna(0).sum()
+    path_trace.append(f"**Overall Total Variance: {total_variance / 1e6:,.2f}M**\n")
 
-    # Drill down calculation left-to-right
-    for level in hierarchy:
-        if current_df.empty or level not in current_df.columns:
-            break
-            
-        grouped = current_df.groupby(level)[target_col].sum()
+    first_level = hierarchy[0]
+    
+    # Get the Top 5 primary categories from the first level of the hierarchy
+    first_level_grouped = df.groupby(first_level)[target_col].sum()
+    top_primary_categories = first_level_grouped.reindex(first_level_grouped.abs().sort_values(ascending=False).index).head(5)
+
+    # Loop through each primary category (e.g., A, then B) and drill down
+    for primary_cat, primary_val in top_primary_categories.items():
+        path_trace.append(f"=========================================")
+        path_trace.append(f"🔹 **Analyzing Primary Category: '{primary_cat}'** (Total: {primary_val / 1e6:,.2f}M)")
+        path_trace.append(f"=========================================\n")
         
-        if grouped.empty or grouped.isna().all():
-            break
-            
-        # Get Top 5 drivers based on absolute impact
-        top_5 = grouped.reindex(grouped.abs().sort_values(ascending=False).index).head(5)
+        # Filter data to ONLY this primary category
+        current_df = df[df[first_level] == primary_cat]
         
-        path_trace.append(f"--- **Top Drivers at Level: '{level}'** ---")
-        for idx, (name, val) in enumerate(top_5.items(), 1):
-            # Format in millions (M)
-            path_trace.append(f"  {idx}. '{name}': {val / 1e6:,.2f}M")
+        # Drill down through the REMAINING levels of the hierarchy
+        for level in hierarchy[1:]:
+            if current_df.empty or level not in current_df.columns:
+                break
+                
+            grouped = current_df.groupby(level)[target_col].sum()
             
-        # Find the #1 node to continue the drill-down
-        max_driver = top_5.index[0]
-        
-        if pd.isna(max_driver):
-            break
+            if grouped.empty or grouped.isna().all():
+                break
+                
+            # Get Top 5 drivers for this specific branch
+            top_5 = grouped.reindex(grouped.abs().sort_values(ascending=False).index).head(5)
             
-        path_trace.append(f"\n*=> Drilling down into '{max_driver}' (highest variance) for the next level...*\n")
-        
-        # Filter dataframe to only the top driver for the next level
-        current_df = current_df[current_df[level] == max_driver]
+            path_trace.append(f"--- **Top 5 Drivers in '{level}' (Inside {primary_cat})** ---")
+            for idx, (name, val) in enumerate(top_5.items(), 1):
+                path_trace.append(f"  {idx}. '{name}': {val / 1e6:,.2f}M")
+                
+            # Find the #1 node to continue the drill-down for this specific branch
+            max_driver = top_5.index[0]
+            
+            if pd.isna(max_driver):
+                break
+                
+            path_trace.append(f"\n*=> Drilling down into '{max_driver}'...*\n")
+            
+            # Filter dataframe for the next level down
+            current_df = current_df[current_df[level] == max_driver]
+            
+        path_trace.append("\n") # Add a visual gap before starting the next primary category (e.g., Category B)
         
     return {"path_trace": path_trace}
 
 def synthesize_insight_node(state: AgentState) -> Dict[str, Any]:
-    """Azure OpenAI generates the one-liner summary"""
+    """Azure OpenAI generates an executive summary spanning the major branches."""
     
     if state["path_trace"] and "⚠️ Error" in state["path_trace"][0]:
         return {"final_summary": "Analysis aborted due to invalid data configuration."}
@@ -100,11 +118,11 @@ def synthesize_insight_node(state: AgentState) -> Dict[str, Any]:
     )
 
     system_prompt = (
-        "You are a strict, professional financial data analyst. You are reviewing a data drill-down "
-        "that highlights the top variance drivers at each hierarchical level. All values are in Millions (M). "
-        "Translate the provided data trace into a single, professional, easily readable sentence "
-        "explaining the primary root cause (the 'why') of the overall variance to an executive, "
-        "tracing it through the hierarchy. Do not add conversational filler."
+        "You are a strict, professional financial data analyst. You are reviewing a branched variance "
+        "analysis that explores the root causes across multiple primary categories. All values are in Millions (M). "
+        "Translate the provided data trace into a professional, concise executive summary (2-3 sentences max) "
+        "highlighting the most critical drivers across the major categories analyzed. "
+        "Do not add conversational filler."
     )
     
     trace_text = "\n".join(state["path_trace"])
@@ -134,10 +152,10 @@ def build_graph():
 # ==========================================
 # 4. STREAMLIT UI (SIDEBAR CONFIG)
 # ==========================================
-st.set_page_config(page_title="Variance Analyzer", layout="wide")
+st.set_page_config(page_title="Branched Variance Analyzer", layout="wide")
 
-st.title("Root Cause Variance Analyzer")
-st.write("Upload your dataset in the sidebar to begin. Values will be analyzed and displayed in Millions (M).")
+st.title("Branched Root Cause Analyzer")
+st.write("Upload your dataset. The system will take the highest level of your hierarchy, calculate the variance, and execute a deep-dive drill down for each of the top primary categories independently.")
 
 # SIDEBAR CONTROLS
 with st.sidebar:
@@ -146,9 +164,7 @@ with st.sidebar:
 
     if uploaded_file is not None:
         try:
-            # Handle Excel Sheet Selection
             if uploaded_file.name.endswith('.xlsx'):
-                # Read file into memory buffer to avoid Streamlit file pointer reset issues
                 file_buffer = io.BytesIO(uploaded_file.getvalue())
                 xls = pd.ExcelFile(file_buffer)
                 sheet_name = st.selectbox("Select Sheet", xls.sheet_names)
@@ -159,7 +175,6 @@ with st.sidebar:
             st.header("2. Configure Metrics")
             num_cols = df.select_dtypes(include=['number']).columns.tolist()
             
-            # Variance Checkbox Logic
             has_variance_col = st.checkbox("Variance column already present?", value=True)
             
             variance_col = ""
@@ -167,7 +182,6 @@ with st.sidebar:
             compare_scenario = ""
             
             if has_variance_col:
-                # Pre-select a column if it has 'var' in the name, otherwise pick first
                 default_var = next((c for c in num_cols if 'var' in c.lower()), num_cols[0] if num_cols else None)
                 idx = num_cols.index(default_var) if default_var in num_cols else 0
                 variance_col = st.selectbox("Select Variance Column", num_cols, index=idx)
@@ -176,19 +190,17 @@ with st.sidebar:
                 base_scenario = st.selectbox("Select Base Scenario (e.g. 2024_ACT)", num_cols)
                 compare_scenario = st.selectbox("Select Compare Scenario (e.g. 2025_FC2+10)", num_cols)
 
-            st.header("3. Configure Hierarchy")
-            # Auto-detect categorical columns for the default hierarchy
+            st.header("3. Select Hierarchy")
             cat_cols = df.select_dtypes(include=['object', 'string', 'category']).columns.tolist()
             all_cols = df.columns.tolist()
             
             hierarchy = st.multiselect(
-                "Hierarchy (Left to Right)", 
+                "Hierarchy Flow (Left to Right)", 
                 options=all_cols, 
                 default=cat_cols,
-                help="Defaults to all text columns. Reorder or remove as needed."
+                help="The algorithm will branch based on the FIRST column selected here, and drill down into the subsequent columns."
             )
 
-            # Execution Button in Sidebar
             run_analysis = st.button("Generate Commentary", type="primary", use_container_width=True)
 
         except Exception as e:
@@ -201,13 +213,13 @@ if uploaded_file is not None and 'df' in locals():
 
     if run_analysis:
         if not hierarchy:
-            st.warning("Please select at least one column for the hierarchy in the sidebar.")
+            st.warning("Please select at least one column for the hierarchy.")
         elif has_variance_col and not variance_col:
             st.warning("Please select a variance column.")
         elif not has_variance_col and (not base_scenario or not compare_scenario):
             st.warning("Please select both Base and Compare scenarios.")
         else:
-            with st.spinner("Analyzing dataset step-by-step..."):
+            with st.spinner("Executing branched drill-down analysis..."):
                 app_graph = build_graph()
                 
                 inputs = {
@@ -229,12 +241,15 @@ if uploaded_file is not None and 'df' in locals():
                 else:
                     st.success(result["final_summary"])
                 
-                st.markdown("### 🧮 Step-by-Step Top Analysis")
-                # Render the text trace cleanly
+                st.markdown("### 🧮 Branched Drill-Down Trace")
                 for step in result["path_trace"]:
-                    if step.startswith("---") or step.startswith("**Total"):
+                    if step.startswith("===") or step.startswith("🔹") or step.startswith("**Overall"):
+                        st.markdown(step)
+                    elif step.startswith("---"):
                         st.markdown(step)
                     elif step.startswith("*=>"):
                         st.caption(step)
+                    elif step.strip() == "":
+                        st.write("") 
                     else:
                         st.text(step)
