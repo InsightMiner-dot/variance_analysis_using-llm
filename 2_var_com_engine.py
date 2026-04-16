@@ -23,9 +23,9 @@ class AgentState(TypedDict):
     compare_scenario: str
     
     # Decoupled Data States
-    error: str                      # Explicit error handling
-    llm_trace_text: str             # Raw text strictly for the LLM prompt
-    ui_trace_data: List[Dict]       # Structured data strictly for building the Streamlit UI
+    error: str                      
+    llm_trace_text: str             
+    ui_trace_data: List[Dict]       
     
     final_summary: str
 
@@ -54,7 +54,6 @@ def calculate_variance_node(state: AgentState) -> Dict[str, Any]:
         target_col = "Calculated_Variance"
         df[target_col] = df[base_col] - df[comp_col]
 
-    # Initialize Trace Trackers
     llm_trace = []
     ui_data = []
 
@@ -67,7 +66,6 @@ def calculate_variance_node(state: AgentState) -> Dict[str, Any]:
     top_primary_categories = first_level_grouped.reindex(first_level_grouped.abs().sort_values(ascending=False).index).head(5)
 
     for primary_cat, primary_val in top_primary_categories.items():
-        # Setup UI Data Structure for this branch
         branch_data = {
             "primary_category": primary_cat,
             "total_val": primary_val,
@@ -75,10 +73,8 @@ def calculate_variance_node(state: AgentState) -> Dict[str, Any]:
         }
         
         llm_trace.append(f"🔹 Primary Category: '{primary_cat}' (Total: {primary_val / 1e6:,.2f}M)")
-        
         current_df = df[df[first_level] == primary_cat]
         
-        # Scenario 1: Only one hierarchy level selected
         if len(hierarchy) == 1:
              level_data = {"level_name": first_level, "is_final": True, "drivers": []}
              llm_trace.append(f"--- FINAL LEVEL: Top 5 Reasons in '{first_level}' ---")
@@ -91,7 +87,6 @@ def calculate_variance_node(state: AgentState) -> Dict[str, Any]:
              ui_data.append(branch_data)
              continue
 
-        # Scenario 2: Multiple hierarchy levels
         for i, level in enumerate(hierarchy[1:]):
             is_last_level = (i == len(hierarchy[1:]) - 1)
             
@@ -104,7 +99,6 @@ def calculate_variance_node(state: AgentState) -> Dict[str, Any]:
                 
             top_5 = grouped.reindex(grouped.abs().sort_values(ascending=False).index).head(5)
             
-            # Record level data for UI
             level_data = {
                 "level_name": level, 
                 "is_final": is_last_level, 
@@ -182,29 +176,9 @@ def build_graph():
     return workflow.compile()
 
 # ==========================================
-# 4. STREAMLIT UI (DASHBOARD STYLE)
+# 4. STREAMLIT UI (COMPACT LAYOUT)
 # ==========================================
 st.set_page_config(page_title="Branched Variance Analyzer", layout="wide")
-
-# Custom CSS to enhance the metric cards and dividers
-st.markdown("""
-<style>
-    div[data-testid="metric-container"] {
-        background-color: #ffffff;
-        border: 1px solid #e0e0e0;
-        padding: 15px;
-        border-radius: 8px;
-        box-shadow: 0 2px 4px rgba(0,0,0,0.05);
-    }
-    .drill-down-arrow {
-        text-align: center;
-        color: #888888;
-        font-size: 14px;
-        margin: 15px 0px;
-        font-weight: 500;
-    }
-</style>
-""", unsafe_allow_html=True)
 
 st.title("📊 Root Cause Analyzer")
 
@@ -271,7 +245,6 @@ if uploaded_file is not None and 'df' in locals():
             
             result = app_graph.invoke(inputs)
             
-            # Error Handling
             if result.get("error"):
                 st.error(result["error"])
             else:
@@ -279,36 +252,33 @@ if uploaded_file is not None and 'df' in locals():
                 # 1. PROFESSIONAL EXECUTIVE REPORT
                 # ---------------------------------------------------------
                 st.markdown("---")
-                st.markdown('<div style="padding: 20px; border-radius: 10px; background-color: #f8f9fa; border: 1px solid #e0e0e0;">', unsafe_allow_html=True)
                 st.markdown(result["final_summary"])
-                st.markdown('</div>', unsafe_allow_html=True)
-                
                 st.write("") 
                 
                 # ---------------------------------------------------------
-                # 2. UI VISUAL TRACE (DASHBOARD METRICS)
+                # 2. UI VISUAL TRACE (COMPACT FLAT LIST)
                 # ---------------------------------------------------------
-                st.markdown("### 🧮 Interactive Drill-Down Breakdown")
-                
-                # Iterate through the structured UI dictionary we created in the Pandas node
-                for branch in result["ui_trace_data"]:
-                    # Create a clean expander for every primary category
-                    with st.expander(f"🏢 {branch['primary_category']} (Impact: {branch['total_val'] / 1e6:,.2f}M)", expanded=True):
-                        
-                        for lvl in branch["levels"]:
-                            st.markdown(f"**Level:** `{lvl['level_name']}` {'*(Final Root Causes)*' if lvl['is_final'] else ''}")
-                            
-                            # Render horizontal metric cards for up to 5 drivers
-                            if lvl["drivers"]:
-                                cols = st.columns(len(lvl["drivers"]))
-                                for col, driver in zip(cols, lvl["drivers"]):
-                                    with col:
-                                        # Use standard Streamlit metrics for a clean look
-                                        st.metric(label=str(driver["name"]), value=f"{driver['val'] / 1e6:,.2f}M")
-                            
-                            # Add a visual "Drill Down" arrow pointing to the next level
-                            if not lvl["is_final"] and lvl.get("drill_target"):
-                                st.markdown(f"<div class='drill-down-arrow'>⬇️ Deep Diving into '{lvl['drill_target']}' ⬇️</div>", unsafe_allow_html=True)
-                
+                st.markdown("---")
+                st.markdown("### 🧮 Drill-Down Trace")
                 st.write("")
-                st.success("✅ Analysis Complete. Ready to move to Excel Generation.")
+                
+                # Iterate through the structured UI data and print clean, inline text
+                for branch in result["ui_trace_data"]:
+                    # Primary Category Header
+                    st.markdown(f"**🏢 {branch['primary_category']}** `({branch['total_val'] / 1e6:,.2f}M)`")
+                    
+                    for lvl in branch["levels"]:
+                        is_final = lvl['is_final']
+                        
+                        # Format drivers into a single compact line separated by pipes
+                        driver_strings = [f"{d['name']} `{d['val'] / 1e6:,.2f}M`" for d in lvl["drivers"]]
+                        drivers_inline = " &nbsp;|&nbsp; ".join(driver_strings)
+                        
+                        if is_final:
+                            st.markdown(f"&nbsp;&nbsp;&nbsp;&nbsp;🎯 **Final Root Causes ({lvl['level_name']}):** {drivers_inline}")
+                        else:
+                            st.markdown(f"&nbsp;&nbsp;&nbsp;&nbsp;🔸 **{lvl['level_name']}:** {drivers_inline}")
+                            if lvl.get("drill_target"):
+                                st.caption(f"&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;*↳ Deep diving into {lvl['drill_target']}...*")
+                    
+                    st.markdown("---")
