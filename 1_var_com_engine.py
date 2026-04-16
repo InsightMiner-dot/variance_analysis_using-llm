@@ -38,6 +38,7 @@ def calculate_variance_node(state: AgentState) -> Dict[str, Any]:
     if not hierarchy:
         return {"path_trace": ["⚠️ Error: No hierarchy columns selected."]}
         
+    # Determine the target column for calculation
     if has_var:
         target_col = state.get("variance_col")
         if target_col not in df.columns:
@@ -48,17 +49,21 @@ def calculate_variance_node(state: AgentState) -> Dict[str, Any]:
         if base_col not in df.columns or comp_col not in df.columns:
              return {"path_trace": ["⚠️ Error: Scenario columns not found."]}
         
+        # Calculate dynamic variance
         target_col = "Calculated_Variance"
         df[target_col] = df[base_col] - df[comp_col]
 
+    # Calculate global total variance in Millions
     total_variance = df[target_col].fillna(0).sum()
     path_trace.append(f"**Overall Total Variance: {total_variance / 1e6:,.2f}M**\n")
 
     first_level = hierarchy[0]
     
+    # Get the Top 5 primary categories from the first level of the hierarchy
     first_level_grouped = df.groupby(first_level)[target_col].sum()
     top_primary_categories = first_level_grouped.reindex(first_level_grouped.abs().sort_values(ascending=False).index).head(5)
 
+    # Loop through each primary category (e.g., Region A, then Region B)
     for primary_cat, primary_val in top_primary_categories.items():
         path_trace.append(f"=========================================")
         path_trace.append(f"🔹 **Primary Category: '{primary_cat}'** (Total: {primary_val / 1e6:,.2f}M)")
@@ -66,12 +71,14 @@ def calculate_variance_node(state: AgentState) -> Dict[str, Any]:
         
         current_df = df[df[first_level] == primary_cat]
         
+        # If there is only one level selected, just list its top drivers
         if len(hierarchy) == 1:
              path_trace.append(f"--- **FINAL LEVEL: Top 5 Reasons in '{first_level}'** ---")
              for idx, (name, val) in enumerate(top_primary_categories.items(), 1):
                  path_trace.append(f"  {idx}. '{name}': {val / 1e6:,.2f}M")
              continue
 
+        # Drill down through the REMAINING levels of the hierarchy
         for i, level in enumerate(hierarchy[1:]):
             is_last_level = (i == len(hierarchy[1:]) - 1)
             
@@ -83,8 +90,10 @@ def calculate_variance_node(state: AgentState) -> Dict[str, Any]:
             if grouped.empty or grouped.isna().all():
                 break
                 
+            # Get Top 5 drivers for this specific branch
             top_5 = grouped.reindex(grouped.abs().sort_values(ascending=False).index).head(5)
             
+            # Explicitly flag the final level for the LLM to extract
             if is_last_level:
                 path_trace.append(f"--- **FINAL LEVEL: Top 5 Reasons in '{level}' (Inside {primary_cat})** ---")
             else:
@@ -94,9 +103,11 @@ def calculate_variance_node(state: AgentState) -> Dict[str, Any]:
                 path_trace.append(f"  {idx}. '{name}': {val / 1e6:,.2f}M")
                 
             if is_last_level:
-                break
+                break # We reached the end, no need to filter further
                 
+            # Find the #1 node to continue the drill-down
             max_driver = top_5.index[0]
+            
             if pd.isna(max_driver):
                 break
                 
@@ -108,7 +119,7 @@ def calculate_variance_node(state: AgentState) -> Dict[str, Any]:
     return {"path_trace": path_trace}
 
 def synthesize_insight_node(state: AgentState) -> Dict[str, Any]:
-    """Azure OpenAI generates a highly structured, professional Markdown report."""
+    """Azure OpenAI generates an executive summary focusing on the final reasons."""
     
     if state["path_trace"] and "⚠️ Error" in state["path_trace"][0]:
         return {"final_summary": "Analysis aborted due to invalid data configuration."}
@@ -120,19 +131,16 @@ def synthesize_insight_node(state: AgentState) -> Dict[str, Any]:
         api_version=os.getenv("AZURE_OPENAI_API_VERSION")
     )
 
+    # Updated Prompt: Force the LLM to list the final level top 5 for each primary category
     system_prompt = (
-        "You are a Senior Financial Controller presenting a variance report to the executive board. "
-        "You are reviewing a branched variance trace. All values are in Millions (M).\n\n"
-        "Generate a highly professional, clean Markdown report STRICTLY using this structure:\n\n"
-        "### 🎯 Executive Summary\n"
-        "[Provide a crisp 2-sentence summary of the total variance and the overarching narrative.]\n\n"
-        "### 📊 Key Root Causes by Primary Category\n"
-        "[For each Primary Category analyzed in the trace, create a bold sub-bullet. Under it, "
-        "list the Top 2-3 most impactful drivers specifically from the 'FINAL LEVEL' identified in the trace, "
-        "including their exact monetary impact.]\n\n"
-        "### 💡 Strategic Takeaway\n"
-        "[Provide one single sentence of analytical insight based on where the largest variances are concentrated.]\n\n"
-        "Keep the tone strictly professional, objective, and formatting exceptionally clean."
+        "You are a strict, professional financial data analyst. You are reviewing a branched variance "
+        "analysis trace. All values are in Millions (M).\n\n"
+        "Provide an Executive Summary formatted EXACTLY as follows:\n"
+        "1. A brief 1-2 sentence overall conclusion regarding the total variance.\n"
+        "2. A bulleted breakdown for each 'Primary Category' analyzed. Under each Primary Category, "
+        "explicitly list the Top 5 reasons/drivers specifically from the 'FINAL LEVEL' identified in the trace, "
+        "along with their exact variance amounts.\n\n"
+        "Do not add conversational filler. Keep it structured and easy for an executive to read."
     )
     
     trace_text = "\n".join(state["path_trace"])
@@ -160,12 +168,12 @@ def build_graph():
     return workflow.compile()
 
 # ==========================================
-# 4. STREAMLIT UI (PROFESSIONAL LAYOUT)
+# 4. STREAMLIT UI (SIDEBAR CONFIG)
 # ==========================================
-st.set_page_config(page_title="Variance Analyzer", layout="wide")
+st.set_page_config(page_title="Branched Variance Analyzer", layout="wide")
 
-st.title("📊 Root Cause Variance Analyzer")
-st.markdown("Automated hierarchical drill-down and executive commentary generation.")
+st.title("Branched Root Cause Analyzer")
+st.write("Upload your dataset to generate a structured executive summary linking your primary categories directly to their root causes.")
 
 # SIDEBAR CONTROLS
 with st.sidebar:
@@ -197,8 +205,8 @@ with st.sidebar:
                 variance_col = st.selectbox("Select Variance Column", num_cols, index=idx)
             else:
                 st.caption("Calculate: (Base - Compare)")
-                base_scenario = st.selectbox("Select Base Scenario", num_cols)
-                compare_scenario = st.selectbox("Select Compare Scenario", num_cols)
+                base_scenario = st.selectbox("Select Base Scenario (e.g. 2024_ACT)", num_cols)
+                compare_scenario = st.selectbox("Select Compare Scenario (e.g. 2025_FC2+10)", num_cols)
 
             st.header("3. Select Hierarchy")
             cat_cols = df.select_dtypes(include=['object', 'string', 'category']).columns.tolist()
@@ -207,20 +215,19 @@ with st.sidebar:
             hierarchy = st.multiselect(
                 "Hierarchy Flow (Left to Right)", 
                 options=all_cols, 
-                default=cat_cols
+                default=cat_cols,
+                help="The bot will group by the first column, drill through the middle, and report the Top 5 reasons from the LAST column."
             )
 
-            st.markdown("---")
-            run_analysis = st.button("🚀 Generate Report", type="primary", use_container_width=True)
+            run_analysis = st.button("Generate Commentary", type="primary", use_container_width=True)
 
         except Exception as e:
             st.error(f"Error loading file: {e}")
 
 # MAIN PAGE DISPLAY
 if uploaded_file is not None and 'df' in locals():
-    # Use an expander for data preview so it doesn't take up too much vertical space
-    with st.expander("👀 View Raw Data Preview", expanded=False):
-        st.dataframe(df.head(5), use_container_width=True)
+    st.write("### Data Preview")
+    st.dataframe(df.head(3))
 
     if run_analysis:
         if not hierarchy:
@@ -230,7 +237,7 @@ if uploaded_file is not None and 'df' in locals():
         elif not has_variance_col and (not base_scenario or not compare_scenario):
             st.warning("Please select both Base and Compare scenarios.")
         else:
-            with st.spinner("Executing branched drill-down and drafting report..."):
+            with st.spinner("Executing branched drill-down analysis..."):
                 app_graph = build_graph()
                 
                 inputs = {
@@ -244,40 +251,24 @@ if uploaded_file is not None and 'df' in locals():
                 
                 result = app_graph.invoke(inputs)
                 
+                st.markdown("---")
+                st.markdown("### 🤖 Executive Summary")
+                
+                # Render the LLM output with success styling
                 if "aborted" in result["final_summary"].lower() or "error" in result["final_summary"].lower():
                     st.error(result["final_summary"])
                 else:
-                    # TABS FOR CLEAN UI SEPARATION
-                    tab1, tab2 = st.tabs(["📄 Final Executive Report", "🧮 Calculation Trace"])
-                    
-                    with tab1:
-                        # Display the beautiful Markdown report inside a stylized container
-                        st.markdown('<div style="padding: 20px; border-radius: 10px; background-color: #f8f9fa; border: 1px solid #e0e0e0;">', unsafe_allow_html=True)
-                        st.markdown(result["final_summary"])
-                        st.markdown('</div>', unsafe_allow_html=True)
-                        
-                        st.write("") # Spacer
-                        
-                        # Add a download button for the generated report
-                        st.download_button(
-                            label="📥 Download Report (.md)",
-                            data=result["final_summary"],
-                            file_name="executive_variance_report.md",
-                            mime="text/markdown",
-                            use_container_width=False
-                        )
-                        
-                    with tab2:
-                        st.info("This is the exact mathematical path the Pandas engine calculated to feed the LLM.")
-                        # Render the text trace cleanly
-                        for step in result["path_trace"]:
-                            if step.startswith("===") or step.startswith("🔹") or step.startswith("**Overall"):
-                                st.markdown(step)
-                            elif step.startswith("---"):
-                                st.markdown(step)
-                            elif step.startswith("*=>"):
-                                st.caption(step)
-                            elif step.strip() == "":
-                                st.write("") 
-                            else:
-                                st.text(step)
+                    st.success(result["final_summary"])
+                
+                st.markdown("### 🧮 Branched Drill-Down Trace")
+                for step in result["path_trace"]:
+                    if step.startswith("===") or step.startswith("🔹") or step.startswith("**Overall"):
+                        st.markdown(step)
+                    elif step.startswith("---"):
+                        st.markdown(step)
+                    elif step.startswith("*=>"):
+                        st.caption(step)
+                    elif step.strip() == "":
+                        st.write("") 
+                    else:
+                        st.text(step)
