@@ -252,23 +252,29 @@ if uploaded_file is not None and 'df' in locals():
                 result = app_graph.invoke(inputs)
                 
                 st.markdown("---")
-                st.markdown("### 🤖 Executive Summary")
                 
-                # Render the LLM output with success styling
+                # Check for errors first
                 if "aborted" in result["final_summary"].lower() or "error" in result["final_summary"].lower():
                     st.error(result["final_summary"])
                 else:
-                    st.success(result["final_summary"])
-                
-                st.markdown("### 🧮 Branched Drill-Down Trace")
-                for step in result["path_trace"]:
-                    if step.startswith("===") or step.startswith("🔹") or step.startswith("**Overall"):
-                        st.markdown(step)
-                    elif step.startswith("---"):
-                        st.markdown(step)
-                    elif step.startswith("*=>"):
-                        st.caption(step)
-                    elif step.strip() == "":
-                        st.write("") 
-                    else:
-                        st.text(step)
+                    # Create the Split Screen (Left and Right columns)
+                    col_left, col_right = st.columns(2)
+                    
+                    with col_left:
+                        st.markdown("### 🤖 Executive Summary")
+                        st.success(result["final_summary"])
+                        
+                    with col_right:
+                        st.markdown("### 🧮 Branched Drill-Down Trace")
+                        # Render the text trace cleanly
+                        for step in result["path_trace"]:
+                            if step.startswith("===") or step.startswith("🔹") or step.startswith("**Overall"):
+                                st.markdown(step)
+                            elif step.startswith("---"):
+                                st.markdown(step)
+                            elif step.startswith("*=>"):
+                                st.caption(step)
+                            elif step.strip() == "":
+                                st.write("") 
+                            else:
+                                st.text(step)
