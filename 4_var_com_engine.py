@@ -2,6 +2,7 @@ import io
 import os
 import json
 import sqlite3
+import re
 from datetime import datetime
 from typing import Any, Dict, List, TypedDict
 
@@ -14,16 +15,28 @@ from langgraph.graph import END, START, StateGraph
 from langchain_experimental.agents.agent_toolkits import create_pandas_dataframe_agent
 from langchain_community.callbacks.streamlit import StreamlitCallbackHandler
 
-# NEW IMPORT for PowerPoint Generation
+# PPTX IMPORTS FOR PRO STYLING
 from pptx import Presentation
 from pptx.util import Inches, Pt
 from pptx.enum.text import PP_ALIGN
+from pptx.dml.color import RGBColor
+from pptx.enum.shapes import MSO_SHAPE, MSO_CONNECTOR
 
 # Load environment variables
 load_dotenv()
 
 # ==========================================
-# 0. BACKEND DATABASE SETUP (SQLITE)
+# 0. HELPER: MARKDOWN CLEANER
+# ==========================================
+def clean_markdown_for_ppt(text: str) -> str:
+    """Removes LLM markdown artifacts (**, *, #) for clean PowerPoint text."""
+    text = re.sub(r'\*\*(.*?)\*\*', r'\1', text) # Remove bold
+    text = re.sub(r'\*(.*?)\*', r'\1', text) # Remove italics
+    text = re.sub(r'#(.*?)\n', r'\1\n', text) # Remove Headers
+    return text.strip()
+
+# ==========================================
+# 1. BACKEND DATABASE SETUP (SQLITE)
 # ==========================================
 def init_db():
     conn = sqlite3.connect("analysis_history.db")
@@ -102,7 +115,7 @@ def handle_chat_feedback_click(chat_id: int, score: int, msg_idx: int):
     st.toast("✅ Chat feedback recorded!")
 
 # ==========================================
-# 1. DATA CACHING & POWERPOINT GENERATION
+# 2. DATA CACHING & PPTX GENERATOR
 # ==========================================
 @st.cache_data(show_spinner=False)
 def load_and_cache_data(file_bytes, file_name, sheet_name=None):
@@ -112,66 +125,124 @@ def load_and_cache_data(file_bytes, file_name, sheet_name=None):
     else:
         return pd.read_csv(file_buffer)
 
+def add_corporate_header(slide, title_text: str, primary_color: RGBColor, accent_color: RGBColor):
+    """Helper to draw professional headers on slides."""
+    # Header Text
+    header = slide.shapes.add_textbox(Inches(0.5), Inches(0.4), Inches(9), Inches(1))
+    hf = header.text_frame
+    hp = hf.paragraphs[0]
+    hp.text = title_text
+    hp.font.size = Pt(28)
+    hp.font.bold = True
+    hp.font.color.rgb = primary_color
+    
+    # Elegant Underline
+    line = slide.shapes.add_connector(MSO_CONNECTOR.STRAIGHT, Inches(0.5), Inches(1.1), Inches(9.5), Inches(1.1))
+    line.line.color.rgb = accent_color
+    line.line.width = Pt(2)
+
 def generate_ppt_deck(total_variance: str, summary: str, tree_data: List[Dict[str, Any]]) -> io.BytesIO:
-    """Generates a professional PowerPoint deck from the analysis."""
-    # NOTE: To use a custom corporate template, replace Presentation() with Presentation("your_template.pptx")
     prs = Presentation()
     
-    # SLIDE 1: Title Slide
-    title_slide_layout = prs.slide_layouts[0]
-    slide = prs.slides.add_slide(title_slide_layout)
-    title = slide.shapes.title
-    subtitle = slide.placeholders[1]
+    # Corporate Colors (Slate & Dark Blue)
+    primary_color = RGBColor(14, 43, 92)   # Deep Blue
+    accent_color = RGBColor(0, 163, 224)   # Vivid Cyan
+    text_color = RGBColor(89, 89, 89)      # Charcoal
     
-    title.text = "Root Cause Variance Analysis"
-    subtitle.text = f"Total Discovered Variance: {total_var}\nGenerated on: {datetime.now().strftime('%B %d, %Y')}"
+    blank_slide_layout = prs.slide_layouts[6] # Blank Layout for absolute control
+    
+    # ---------------------------------------------
+    # SLIDE 1: TITLE SLIDE
+    # ---------------------------------------------
+    slide1 = prs.slides.add_slide(blank_slide_layout)
+    
+    # Top decorative banner
+    banner = slide1.shapes.add_shape(MSO_SHAPE.RECTANGLE, Inches(0), Inches(0), Inches(10), Inches(0.8))
+    banner.fill.solid()
+    banner.fill.fore_color.rgb = primary_color
+    banner.line.color.rgb = primary_color
+    
+    # Main Title
+    txBox = slide1.shapes.add_textbox(Inches(1), Inches(2.5), Inches(8), Inches(2))
+    tf = txBox.text_frame
+    p = tf.paragraphs[0]
+    p.text = "Variance Analysis & Root Cause Report"
+    p.font.size = Pt(36)
+    p.font.bold = True
+    p.font.color.rgb = primary_color
+    p.alignment = PP_ALIGN.CENTER
+    
+    # Subtitle
+    p2 = tf.add_paragraph()
+    p2.text = f"Total Impact: {total_variance}\nReport Date: {datetime.now().strftime('%B %d, %Y')}"
+    p2.font.size = Pt(18)
+    p2.font.color.rgb = text_color
+    p2.alignment = PP_ALIGN.CENTER
 
-    # SLIDE 2: Executive Summary
-    bullet_slide_layout = prs.slide_layouts[1]
-    slide2 = prs.slides.add_slide(bullet_slide_layout)
-    slide2.shapes.title.text = "Executive Summary"
+    # ---------------------------------------------
+    # SLIDE 2: EXECUTIVE SUMMARY
+    # ---------------------------------------------
+    slide2 = prs.slides.add_slide(blank_slide_layout)
+    add_corporate_header(slide2, "Executive Summary", primary_color, accent_color)
     
-    tf = slide2.shapes.placeholders[1].text_frame
-    tf.word_wrap = True
+    # Summary Content Box
+    content_box = slide2.shapes.add_textbox(Inches(0.5), Inches(1.4), Inches(9), Inches(5.5))
+    cf = content_box.text_frame
+    cf.word_wrap = True
     
-    # Split summary into paragraphs for the slide
-    for para in summary.split('\n'):
-        if para.strip():
-            p = tf.add_paragraph()
-            p.text = para.strip()
-            p.font.size = Pt(14)
-            if para.startswith(('1.', '2.', '-')):
+    clean_summary = clean_markdown_for_ppt(summary)
+    
+    for idx, para in enumerate(clean_summary.split('\n')):
+        clean_para = para.strip()
+        if clean_para:
+            p = cf.paragraphs[0] if idx == 0 else cf.add_paragraph()
+            
+            # Detect if it is a bullet point from the LLM
+            if clean_para.startswith('-') or clean_para.startswith('*') or (len(clean_para) > 1 and clean_para[1] == '.'):
+                # Clean the prefix and set indent
+                p.text = clean_para.lstrip('-*1234567890. ')
                 p.level = 1
+                p.font.size = Pt(14)
+            else:
+                p.text = clean_para
+                p.level = 0
+                p.font.size = Pt(16)
+                p.font.bold = (idx == 0) # Bold the opening conclusion statement
+                
+            p.font.color.rgb = text_color
 
-    # SLIDE 3: Primary Drivers Breakdown
-    slide3 = prs.slides.add_slide(bullet_slide_layout)
-    slide3.shapes.title.text = "Primary Variance Drivers"
+    # ---------------------------------------------
+    # SLIDE 3: PRIMARY DRIVERS BREAKDOWN
+    # ---------------------------------------------
+    slide3 = prs.slides.add_slide(blank_slide_layout)
+    add_corporate_header(slide3, "Primary Variance Drivers", primary_color, accent_color)
     
-    tf3 = slide3.shapes.placeholders[1].text_frame
+    df_box = slide3.shapes.add_textbox(Inches(0.5), Inches(1.4), Inches(9), Inches(5.5))
+    df_frame = df_box.text_frame
+    df_frame.word_wrap = True
     
-    # Extract only the top level branches for the slide
     for node in tree_data:
-        p = tf3.add_paragraph()
+        p = df_frame.paragraphs[0] if node == tree_data[0] else df_frame.add_paragraph()
         p.text = f"{node['item']} (Impact: {node['value_display']})"
         p.font.bold = True
-        p.font.size = Pt(18)
+        p.font.size = Pt(16)
+        p.font.color.rgb = primary_color
         p.level = 0
         
-        # Add sub-drivers if they exist
-        for child in node.get('children', [])[:3]: # Limit to top 3 sub-drivers
-            p_sub = tf3.add_paragraph()
-            p_sub.text = f"↳ {child['column']}: {child['item']} ({child['value_display']})"
+        for child in node.get('children', [])[:4]: # Limit to top 4 subs to prevent overflow
+            p_sub = df_frame.add_paragraph()
+            p_sub.text = f"{child['column']} - {child['item']} ({child['value_display']})"
             p_sub.font.size = Pt(14)
+            p_sub.font.color.rgb = text_color
             p_sub.level = 1
 
-    # Save to memory buffer
     ppt_stream = io.BytesIO()
     prs.save(ppt_stream)
     ppt_stream.seek(0)
     return ppt_stream
 
 # ==========================================
-# 2. LANGGRAPH STATE & NODES 
+# 3. LANGGRAPH STATE & NODES 
 # ==========================================
 class AgentState(TypedDict):
     df: pd.DataFrame
@@ -289,7 +360,7 @@ def count_leaf_nodes(nodes: List[Dict[str, Any]]) -> int:
     return leaf_count
 
 # ==========================================
-# 3. STREAMLIT UI 
+# 4. STREAMLIT UI 
 # ==========================================
 st.set_page_config(page_title="Branched Variance Analyzer", layout="wide")
 
@@ -303,7 +374,7 @@ if "chat_feedback_submitted" not in st.session_state: st.session_state.chat_feed
 
 st.title("📊 Branched Root Cause Analyzer")
 
-# --- SIDEBAR REVERTED ---
+# --- SIDEBAR CONFIGURATION ---
 uploaded_file = None
 df = None
 variance_col, base_scenario, compare_scenario = "", "", ""
@@ -345,7 +416,6 @@ with st.sidebar:
         except Exception as e:
             st.error(f"Error loading file: {e}")
 
-# Create 3 tabs
 tab1, tab2, tab3 = st.tabs(["🚀 New Analysis", "💬 Chat with Data", "🗄️ Run History"])
 
 # --- TAB 1: NEW ANALYSIS ---
@@ -402,25 +472,7 @@ with tab1:
                     st.caption(result["path_trace"][0])
                     render_trace_tree(result.get("tree_data", []))
 
-                # --- POWERPOINT EXPORT BUTTON ---
-                st.markdown("---")
-                st.subheader("Export Results")
-                
-                ppt_file = generate_ppt_deck(
-                    total_variance=total_var,
-                    summary=result["final_summary"],
-                    tree_data=result.get("tree_data", [])
-                )
-                
-                st.download_button(
-                    label="📥 Download Executive Presentation (.pptx)",
-                    data=ppt_file,
-                    file_name=f"Variance_Analysis_Deck_{datetime.now().strftime('%Y%m%d')}.pptx",
-                    mime="application/vnd.openxmlformats-officedocument.presentationml.presentation",
-                    use_container_width=True
-                )
-
-                # --- FEEDBACK MODULE ---
+                # --- FEEDBACK MODULE (Now positioned above Export) ---
                 st.markdown("---")
                 if st.session_state.current_run_id:
                     if st.session_state.run_feedback_submitted:
@@ -430,6 +482,27 @@ with tab1:
                         col_f1, col_f2, _ = st.columns([1, 1, 10])
                         col_f1.button("👍", key="run_up", on_click=handle_run_feedback_click, args=(st.session_state.current_run_id, 1))
                         col_f2.button("👎", key="run_down", on_click=handle_run_feedback_click, args=(st.session_state.current_run_id, -1))
+
+                # --- POWERPOINT EXPORT BUTTON (Small column width) ---
+                st.markdown("<br>", unsafe_allow_html=True)
+                st.subheader("Export Results")
+                
+                ppt_file = generate_ppt_deck(
+                    total_variance=total_var,
+                    summary=result["final_summary"],
+                    tree_data=result.get("tree_data", [])
+                )
+                
+                # Wrapping in a column to make the button smaller
+                col_dl1, col_dl2 = st.columns([1, 2])
+                with col_dl1:
+                    st.download_button(
+                        label="📥 Download Deck (.pptx)",
+                        data=ppt_file,
+                        file_name=f"Variance_Analysis_Deck_{datetime.now().strftime('%Y%m%d')}.pptx",
+                        mime="application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                        use_container_width=True
+                    )
     else:
         st.info("👈 Please upload and configure your data in the sidebar to begin.")
 
