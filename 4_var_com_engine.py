@@ -200,16 +200,102 @@ def render_trace_tree(nodes: List[Dict[str, Any]]) -> None:
             st.markdown(f"- {node['title']}")
 
 
+def render_app_shell() -> None:
+    """Apply professional page styling and header layout."""
+    st.html(
+        """
+        <style>
+            @keyframes fadeSlideIn {
+                from { opacity: 0; transform: translateY(10px); }
+                to { opacity: 1; transform: translateY(0); }
+            }
+
+            .app-hero {
+                padding: 1.4rem 1.6rem 1.2rem 1.6rem;
+                border: 1px solid rgba(30, 41, 59, 0.10);
+                border-radius: 18px;
+                background: linear-gradient(135deg, #f8fafc 0%, #eef4ff 100%);
+                margin-bottom: 1.25rem;
+                animation: fadeSlideIn 0.45s ease-out;
+            }
+
+            .app-kicker {
+                color: #335c81;
+                font-size: 0.82rem;
+                font-weight: 700;
+                letter-spacing: 0.08em;
+                text-transform: uppercase;
+                margin-bottom: 0.45rem;
+            }
+
+            .app-title {
+                color: #0f172a;
+                font-size: 2.3rem;
+                font-weight: 800;
+                line-height: 1.1;
+                margin: 0;
+            }
+
+            .app-subtitle {
+                color: #475569;
+                font-size: 1.05rem;
+                line-height: 1.65;
+                margin-top: 0.7rem;
+                max-width: 920px;
+            }
+
+            .section-title {
+                color: #0f172a;
+                font-size: 1.32rem;
+                font-weight: 750;
+                margin: 0.35rem 0 0.25rem 0;
+            }
+
+            .section-subtitle {
+                color: #64748b;
+                font-size: 0.96rem;
+                margin-bottom: 0.8rem;
+            }
+
+            .block-card {
+                border: 1px solid rgba(30, 41, 59, 0.08);
+                border-radius: 16px;
+                padding: 0.9rem 1rem 0.35rem 1rem;
+                background: #ffffff;
+                box-shadow: 0 10px 30px rgba(15, 23, 42, 0.04);
+                margin-bottom: 1rem;
+                animation: fadeSlideIn 0.45s ease-out;
+            }
+        </style>
+        <div class="app-hero">
+            <div class="app-kicker">Variance Intelligence Workspace</div>
+            <h1 class="app-title">Branched Root Cause Analyzer</h1>
+            <div class="app-subtitle">
+                Upload your dataset, define the variance metric, and review a structured recursive drill-down
+                that connects top-level variance movements to their underlying drivers.
+            </div>
+        </div>
+        """
+    )
+
+
+def render_section_header(title: str, subtitle: str) -> None:
+    st.html(
+        f"""
+        <div class="block-card">
+            <div class="section-title">{title}</div>
+            <div class="section-subtitle">{subtitle}</div>
+        </div>
+        """
+    )
+
+
 # ==========================================
 # 4. STREAMLIT UI (SIDEBAR CONFIG)
 # ==========================================
 st.set_page_config(page_title="Branched Variance Analyzer", layout="wide")
 
-st.title("Branched Root Cause Analyzer")
-st.write(
-    "Upload your dataset to generate a structured executive summary linking your "
-    "primary categories directly to their root causes."
-)
+render_app_shell()
 
 # SIDEBAR CONTROLS
 with st.sidebar:
@@ -253,10 +339,16 @@ with st.sidebar:
 
 # MAIN PAGE DISPLAY
 if uploaded_file is not None and "df" in locals():
-    st.write("### Data Preview")
+    render_section_header(
+        "Data Preview",
+        "Review the incoming dataset before selecting the hierarchy flow.",
+    )
     st.dataframe(df.head(3))
 
-    st.markdown("### 3. Select Hierarchy")
+    render_section_header(
+        "3. Select Hierarchy",
+        "Choose the hierarchy order from left to right for the recursive drill-down.",
+    )
     hierarchy = st.multiselect(
         "Hierarchy Flow (Left to Right)",
         options=all_cols,
@@ -296,10 +388,16 @@ if uploaded_file is not None and "df" in locals():
                     col_left, col_right = st.columns(2)
 
                     with col_left:
-                        st.markdown("### Executive Summary")
+                        render_section_header(
+                            "Executive Summary",
+                            "AI-generated narrative summary based on the filtered final-level drill-down output.",
+                        )
                         st.success(result["final_summary"])
 
                     with col_right:
-                        st.markdown("### Recursive Drill-Down Trace")
+                        render_section_header(
+                            "Recursive Drill-Down Trace",
+                            "Expandable variance tree showing the major branches and their downstream drivers.",
+                        )
                         st.info(result["path_trace"][0])
                         render_trace_tree(result.get("tree_data", []))
