@@ -137,7 +137,7 @@ def add_corporate_header(slide, title_text: str, primary_color: RGBColor, accent
     line.line.color.rgb = accent_color
     line.line.width = Pt(2)
 
-def generate_ppt_deck(total_variance: str, summary: str, tree_data: List[Dict[str, Any]]) -> io.BytesIO:
+def generate_ppt_deck(total_variance: str, exec_summary: str, rca_text: str, tree_data: List[Dict[str, Any]]) -> io.BytesIO:
     prs = Presentation()
     
     primary_color = RGBColor(14, 43, 92)   
@@ -146,11 +146,6 @@ def generate_ppt_deck(total_variance: str, summary: str, tree_data: List[Dict[st
     
     blank_slide_layout = prs.slide_layouts[6] 
     
-    # Extract the Root Cause Analysis to put it on its own slide
-    parts = re.split(r'Root\s+Cause\s+Analysis:', summary, flags=re.IGNORECASE)
-    exec_part = parts[0].replace('Executive Summary:', '').strip()
-    rca_part = parts[1].strip() if len(parts) > 1 else ""
-
     # --- SLIDE 1: TITLE SLIDE ---
     slide1 = prs.slides.add_slide(blank_slide_layout)
     banner = slide1.shapes.add_shape(MSO_SHAPE.RECTANGLE, Inches(0), Inches(0), Inches(10), Inches(0.8))
@@ -179,7 +174,7 @@ def generate_ppt_deck(total_variance: str, summary: str, tree_data: List[Dict[st
     cf = slide2.shapes.add_textbox(Inches(0.5), Inches(1.4), Inches(9), Inches(5.5)).text_frame
     cf.word_wrap = True
     
-    clean_summary = clean_markdown_for_ppt(exec_part)
+    clean_summary = clean_markdown_for_ppt(exec_summary)
     lines = [line.strip() for line in clean_summary.split('\n') if line.strip()]
     
     for idx, para in enumerate(lines):
@@ -189,7 +184,7 @@ def generate_ppt_deck(total_variance: str, summary: str, tree_data: List[Dict[st
         clean_text = para.lstrip('-*1234567890. ')
         
         if is_bullet:
-            p.text = f"  •  {clean_text}"
+            p.text = f"  •  {clean_text}" 
             p.font.size = Pt(14)
             p.font.bold = False
             p.font.color.rgb = text_color
@@ -221,14 +216,14 @@ def generate_ppt_deck(total_variance: str, summary: str, tree_data: List[Dict[st
             p_sub.font.color.rgb = text_color
 
     # --- SLIDE 4: ROOT CAUSE ANALYSIS ---
-    if rca_part:
+    if rca_text and "generation failed" not in rca_text.lower():
         slide4 = prs.slides.add_slide(blank_slide_layout)
         add_corporate_header(slide4, "Root Cause Analysis", primary_color, accent_color)
         
         rca_frame = slide4.shapes.add_textbox(Inches(0.5), Inches(1.4), Inches(9), Inches(5.5)).text_frame
         rca_frame.word_wrap = True
         
-        clean_rca = clean_markdown_for_ppt(rca_part)
+        clean_rca = clean_markdown_for_ppt(rca_text)
         p = rca_frame.paragraphs[0]
         p.text = clean_rca
         p.font.size = Pt(16)
@@ -327,13 +322,13 @@ def synthesize_insight_node(state: AgentState) -> Dict[str, Any]:
         api_version=os.getenv("AZURE_OPENAI_API_VERSION"),
     )
     
+    # Restored Original Summary format, with hidden RCA delimiter appended.
     system_prompt = (
-        "You are a strict, professional financial data analyst. Review the provided variance data and generate a report formatted EXACTLY as follows:\n\n"
-        "Executive Summary:\n"
+        "You are a strict, professional financial data analyst. Provide an Executive Summary formatted EXACTLY as follows:\n"
         "1. A brief 1-2 sentence overall conclusion regarding the total variance.\n"
         "2. A bulleted breakdown for each 'Primary Category' analyzed. Under each, list the Top 5 reasons/drivers provided, along with exact variance amounts.\n\n"
-        "Root Cause Analysis:\n"
-        "Provide a detailed 4 to 5 line analytical paragraph explaining the underlying root causes of the variance based strictly on the provided data.\n\n"
+        "---ROOT CAUSE ANALYSIS---\n"
+        "Provide a detailed 4 to 5 line analytical paragraph explaining the underlying root causes of the variance based strictly on the provided data.\n"
         "Do not add conversational filler."
     )
     messages = [SystemMessage(content=system_prompt), HumanMessage(content=f"Filtered Final Level Data:\n{chr(10).join(state['final_level_data'])}")]
@@ -458,9 +453,9 @@ with tab1:
             else:
                 total_var = result["path_trace"][0].replace("Overall Total Variance: ", "")
                 
-                # Split AI Summary for UI
-                parts = re.split(r'Root\s+Cause\s+Analysis:', result["final_summary"], flags=re.IGNORECASE)
-                exec_summary = parts[0].replace('Executive Summary:', '').strip()
+                # Split AI Summary to extract the old Exec Summary and the new RCA
+                parts = result["final_summary"].split("---ROOT CAUSE ANALYSIS---")
+                exec_summary = parts[0].strip()
                 rca_text = parts[1].strip() if len(parts) > 1 else "Root cause analysis generation failed."
 
                 # KPI Cards
@@ -472,12 +467,6 @@ with tab1:
 
                 st.markdown("<br>", unsafe_allow_html=True)
                 
-                # --- ROOT CAUSE ANALYSIS CARD (TOP) ---
-                st.markdown("### 🔍 Root Cause Analysis")
-                st.success(rca_text)
-
-                st.markdown("<br>", unsafe_allow_html=True)
-
                 # --- EXECUTIVE SUMMARY & DRILL DOWN (SIDE BY SIDE) ---
                 col_left, col_right = st.columns(2)
                 with col_left:
@@ -487,6 +476,11 @@ with tab1:
                     st.subheader("Recursive Drill-Down Trace")
                     st.caption(result["path_trace"][0])
                     render_trace_tree(result.get("tree_data", []))
+
+                # --- ROOT CAUSE ANALYSIS CARD (BELOW) ---
+                st.markdown("<br>", unsafe_allow_html=True)
+                st.subheader("🔍 Root Cause Analysis")
+                st.success(rca_text)
 
                 # --- FEEDBACK MODULE ---
                 st.markdown("---")
@@ -505,7 +499,8 @@ with tab1:
                 
                 ppt_file = generate_ppt_deck(
                     total_variance=total_var,
-                    summary=result["final_summary"],
+                    exec_summary=exec_summary,
+                    rca_text=rca_text,
                     tree_data=result.get("tree_data", [])
                 )
                 
