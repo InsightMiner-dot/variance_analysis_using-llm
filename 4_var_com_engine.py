@@ -272,19 +272,6 @@ def render_app_shell() -> None:
                 margin-bottom: 1rem;
                 animation: fadeSlideIn 0.45s ease-out;
             }
-
-            .result-card-title {
-                color: #0f172a;
-                font-size: 1.18rem;
-                font-weight: 750;
-                margin: 0 0 0.2rem 0;
-            }
-
-            .result-card-subtitle {
-                color: #64748b;
-                font-size: 0.92rem;
-                margin-bottom: 0.85rem;
-            }
         </style>
         """
     )
@@ -301,12 +288,10 @@ def render_section_header(title: str, subtitle: str) -> None:
     )
 
 
-def open_result_card(title: str, subtitle: str) -> None:
+def open_result_card() -> None:
     st.html(
-        f"""
+        """
         <div class="result-card">
-            <div class="result-card-title">{title}</div>
-            <div class="result-card-subtitle">{subtitle}</div>
         """
     )
 
@@ -424,18 +409,14 @@ if uploaded_file is not None and "df" in locals():
                     col_left, col_right = st.columns(2)
 
                     with col_left:
-                        open_result_card(
-                            "Executive Summary",
-                            "AI-generated narrative summary based on the filtered final-level drill-down output.",
-                        )
-                        st.success(result["final_summary"])
+                        st.write("### Executive Summary")
+                        open_result_card()
+                        st.write(result["final_summary"])
                         close_result_card()
 
                     with col_right:
-                        open_result_card(
-                            "Recursive Drill-Down Trace",
-                            "Expandable variance tree showing the major branches and their downstream drivers.",
-                        )
+                        st.write("### Recursive Drill-Down Trace")
+                        open_result_card()
                         st.info(result["path_trace"][0])
                         render_trace_tree(result.get("tree_data", []))
                         close_result_card()
