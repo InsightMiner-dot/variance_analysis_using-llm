@@ -12,9 +12,12 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_openai import AzureChatOpenAI
 from langgraph.graph import END, START, StateGraph
 from langchain_experimental.agents.agent_toolkits import create_pandas_dataframe_agent
-
-# NEW IMPORT for Chat UI Transparency
 from langchain_community.callbacks.streamlit import StreamlitCallbackHandler
+
+# NEW IMPORT for PowerPoint Generation
+from pptx import Presentation
+from pptx.util import Inches, Pt
+from pptx.enum.text import PP_ALIGN
 
 # Load environment variables
 load_dotenv()
@@ -88,7 +91,6 @@ def fetch_history_from_db() -> pd.DataFrame:
 
 init_db()
 
-# Callback functions for UI buttons (now updates session state to hide buttons)
 def handle_run_feedback_click(run_id: int, score: int):
     update_run_feedback(run_id, score)
     st.session_state.run_feedback_submitted = True
@@ -100,19 +102,76 @@ def handle_chat_feedback_click(chat_id: int, score: int, msg_idx: int):
     st.toast("✅ Chat feedback recorded!")
 
 # ==========================================
-# 1. DATA CACHING (PERFORMANCE BOOST)
+# 1. DATA CACHING & POWERPOINT GENERATION
 # ==========================================
 @st.cache_data(show_spinner=False)
 def load_and_cache_data(file_bytes, file_name, sheet_name=None):
-    """Caches the loaded dataframe so UI interactions are instantaneous."""
     file_buffer = io.BytesIO(file_bytes)
     if file_name.endswith(".xlsx"):
         return pd.read_excel(file_buffer, sheet_name=sheet_name)
     else:
         return pd.read_csv(file_buffer)
 
+def generate_ppt_deck(total_variance: str, summary: str, tree_data: List[Dict[str, Any]]) -> io.BytesIO:
+    """Generates a professional PowerPoint deck from the analysis."""
+    # NOTE: To use a custom corporate template, replace Presentation() with Presentation("your_template.pptx")
+    prs = Presentation()
+    
+    # SLIDE 1: Title Slide
+    title_slide_layout = prs.slide_layouts[0]
+    slide = prs.slides.add_slide(title_slide_layout)
+    title = slide.shapes.title
+    subtitle = slide.placeholders[1]
+    
+    title.text = "Root Cause Variance Analysis"
+    subtitle.text = f"Total Discovered Variance: {total_var}\nGenerated on: {datetime.now().strftime('%B %d, %Y')}"
+
+    # SLIDE 2: Executive Summary
+    bullet_slide_layout = prs.slide_layouts[1]
+    slide2 = prs.slides.add_slide(bullet_slide_layout)
+    slide2.shapes.title.text = "Executive Summary"
+    
+    tf = slide2.shapes.placeholders[1].text_frame
+    tf.word_wrap = True
+    
+    # Split summary into paragraphs for the slide
+    for para in summary.split('\n'):
+        if para.strip():
+            p = tf.add_paragraph()
+            p.text = para.strip()
+            p.font.size = Pt(14)
+            if para.startswith(('1.', '2.', '-')):
+                p.level = 1
+
+    # SLIDE 3: Primary Drivers Breakdown
+    slide3 = prs.slides.add_slide(bullet_slide_layout)
+    slide3.shapes.title.text = "Primary Variance Drivers"
+    
+    tf3 = slide3.shapes.placeholders[1].text_frame
+    
+    # Extract only the top level branches for the slide
+    for node in tree_data:
+        p = tf3.add_paragraph()
+        p.text = f"{node['item']} (Impact: {node['value_display']})"
+        p.font.bold = True
+        p.font.size = Pt(18)
+        p.level = 0
+        
+        # Add sub-drivers if they exist
+        for child in node.get('children', [])[:3]: # Limit to top 3 sub-drivers
+            p_sub = tf3.add_paragraph()
+            p_sub.text = f"↳ {child['column']}: {child['item']} ({child['value_display']})"
+            p_sub.font.size = Pt(14)
+            p_sub.level = 1
+
+    # Save to memory buffer
+    ppt_stream = io.BytesIO()
+    prs.save(ppt_stream)
+    ppt_stream.seek(0)
+    return ppt_stream
+
 # ==========================================
-# 2. LANGGRAPH STATE & NODES (Unchanged)
+# 2. LANGGRAPH STATE & NODES 
 # ==========================================
 class AgentState(TypedDict):
     df: pd.DataFrame
@@ -230,7 +289,7 @@ def count_leaf_nodes(nodes: List[Dict[str, Any]]) -> int:
     return leaf_count
 
 # ==========================================
-# 3. STREAMLIT UI WITH TOP NAVBAR & STATE
+# 3. STREAMLIT UI 
 # ==========================================
 st.set_page_config(page_title="Branched Variance Analyzer", layout="wide")
 
@@ -244,12 +303,15 @@ if "chat_feedback_submitted" not in st.session_state: st.session_state.chat_feed
 
 st.title("📊 Branched Root Cause Analyzer")
 
-# --- TOP NAVIGATION BAR / EXPANDER (Replaces Sidebar) ---
+# --- SIDEBAR REVERTED ---
 uploaded_file = None
 df = None
+variance_col, base_scenario, compare_scenario = "", "", ""
+all_cols, cat_cols = [], []
+has_variance_col = True
 
-with st.expander("⚙️ Configuration & Data Upload", expanded=True if "df_loaded" not in st.session_state else False):
-    st.write("### 1. Upload Data")
+with st.sidebar:
+    st.header("1. Upload Data")
     uploaded_file = st.file_uploader("Upload CSV/Excel", type=["csv", "xlsx"])
     
     if uploaded_file is not None:
@@ -258,40 +320,30 @@ with st.expander("⚙️ Configuration & Data Upload", expanded=True if "df_load
         
         try:
             if file_name.endswith(".xlsx"):
-                # Temporarily read just sheet names, actual loading is cached
                 xls_temp = pd.ExcelFile(io.BytesIO(file_bytes))
                 sheet_name = st.selectbox("Select Sheet", xls_temp.sheet_names)
                 df = load_and_cache_data(file_bytes, file_name, sheet_name)
             else:
                 df = load_and_cache_data(file_bytes, file_name)
             
-            st.session_state.df_loaded = True
-            
-            st.write("### 2. Configure Metrics")
-            config_col1, config_col2 = st.columns(2)
-            
+            st.header("2. Configure Metrics")
             num_cols = df.select_dtypes(include=["number"]).columns.tolist()
             cat_cols = df.select_dtypes(include=["object", "string", "category"]).columns.tolist()
             all_cols = df.columns.tolist()
             
-            with config_col1:
-                has_variance_col = st.checkbox("Variance column already present?", value=True)
+            has_variance_col = st.checkbox("Variance column already present?", value=True)
             
-            variance_col, base_scenario, compare_scenario = "", "", ""
-            
-            with config_col2:
-                if has_variance_col:
-                    default_var = next((c for c in num_cols if "var" in c.lower()), num_cols[0] if num_cols else None)
-                    idx = num_cols.index(default_var) if default_var in num_cols else 0
-                    variance_col = st.selectbox("Select Variance Column", num_cols, index=idx)
-                else:
-                    base_scenario = st.selectbox("Select Base Scenario (e.g. ACT)", num_cols)
-                    compare_scenario = st.selectbox("Select Compare Scenario (e.g. FC)", num_cols)
+            if has_variance_col:
+                default_var = next((c for c in num_cols if "var" in c.lower()), num_cols[0] if num_cols else None)
+                idx = num_cols.index(default_var) if default_var in num_cols else 0
+                variance_col = st.selectbox("Select Variance Column", num_cols, index=idx)
+            else:
+                st.caption("Calculate: (Base - Compare)")
+                base_scenario = st.selectbox("Select Base Scenario (e.g. ACT)", num_cols)
+                compare_scenario = st.selectbox("Select Compare Scenario (e.g. FC)", num_cols)
 
         except Exception as e:
             st.error(f"Error loading file: {e}")
-
-st.markdown("---")
 
 # Create 3 tabs
 tab1, tab2, tab3 = st.tabs(["🚀 New Analysis", "💬 Chat with Data", "🗄️ Run History"])
@@ -310,7 +362,6 @@ with tab1:
             elif not has_variance_col and (not base_scenario or not compare_scenario): st.warning("Please select both Base and Compare scenarios.")
             else:
                 with st.spinner("Executing recursive drill-down analysis..."):
-                    # Reset feedback state for new run
                     st.session_state.run_feedback_submitted = False 
                     
                     app_graph = build_graph()
@@ -334,9 +385,9 @@ with tab1:
             if "aborted" in result["final_summary"].lower() or "error" in result["final_summary"].lower():
                 st.error(result["final_summary"])
             else:
-                total_variance_label = result["path_trace"][0].replace("Overall Total Variance: ", "")
+                total_var = result["path_trace"][0].replace("Overall Total Variance: ", "")
                 col1, col2, col3, col4 = st.columns(4)
-                col1.metric("Total Variance", total_variance_label)
+                col1.metric("Total Variance", total_var)
                 col2.metric("Hierarchy Levels", str(len(st.session_state.current_hierarchy)))
                 col3.metric("Primary Branches", str(len(result.get("tree_data", []))))
                 col4.metric("Final Nodes", str(count_leaf_nodes(result.get("tree_data", []))))
@@ -351,6 +402,25 @@ with tab1:
                     st.caption(result["path_trace"][0])
                     render_trace_tree(result.get("tree_data", []))
 
+                # --- POWERPOINT EXPORT BUTTON ---
+                st.markdown("---")
+                st.subheader("Export Results")
+                
+                ppt_file = generate_ppt_deck(
+                    total_variance=total_var,
+                    summary=result["final_summary"],
+                    tree_data=result.get("tree_data", [])
+                )
+                
+                st.download_button(
+                    label="📥 Download Executive Presentation (.pptx)",
+                    data=ppt_file,
+                    file_name=f"Variance_Analysis_Deck_{datetime.now().strftime('%Y%m%d')}.pptx",
+                    mime="application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                    use_container_width=True
+                )
+
+                # --- FEEDBACK MODULE ---
                 st.markdown("---")
                 if st.session_state.current_run_id:
                     if st.session_state.run_feedback_submitted:
@@ -361,7 +431,7 @@ with tab1:
                         col_f1.button("👍", key="run_up", on_click=handle_run_feedback_click, args=(st.session_state.current_run_id, 1))
                         col_f2.button("👎", key="run_down", on_click=handle_run_feedback_click, args=(st.session_state.current_run_id, -1))
     else:
-        st.info("👆 Please upload and configure your data above to begin.")
+        st.info("👈 Please upload and configure your data in the sidebar to begin.")
 
 # --- TAB 2: CHAT WITH DATA ---
 with tab2:
@@ -385,9 +455,7 @@ with tab2:
             with st.chat_message("user"): st.markdown(prompt)
 
             with st.chat_message("assistant"):
-                # The StreamlitCallbackHandler visualizes the LLM's thought process
                 st_callback = StreamlitCallbackHandler(st.container())
-                
                 try:
                     llm_chat = AzureChatOpenAI(
                         azure_endpoint=os.getenv("AZURE_OPENAI_ENDPOINT"),
@@ -411,7 +479,7 @@ with tab2:
                 except Exception as e:
                     st.error(f"Failed to query data: {e}")
     else:
-        st.info("👆 Please upload a data file above to chat with it.")
+        st.info("👈 Please upload a data file in the sidebar to chat with it.")
 
 # --- TAB 3: HISTORY ---
 with tab3:
