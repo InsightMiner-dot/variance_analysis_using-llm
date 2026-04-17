@@ -200,6 +200,36 @@ def render_trace_tree(nodes: List[Dict[str, Any]]) -> None:
             st.markdown(f"- {node['title']}")
 
 
+def count_leaf_nodes(nodes: List[Dict[str, Any]]) -> int:
+    leaf_count = 0
+    for node in nodes:
+        children = node.get("children", [])
+        if children:
+            leaf_count += count_leaf_nodes(children)
+        else:
+            leaf_count += 1
+    return leaf_count
+
+
+def render_kpi_cards(
+    total_variance_label: str,
+    hierarchy_count: int,
+    primary_branch_count: int,
+    final_node_count: int,
+) -> None:
+    metric_cols = st.columns(4)
+    metrics = [
+        ("Total Variance", total_variance_label),
+        ("Hierarchy Levels", str(hierarchy_count)),
+        ("Primary Branches", str(primary_branch_count)),
+        ("Final Nodes", str(final_node_count)),
+    ]
+
+    for col, (label, value) in zip(metric_cols, metrics):
+        with col:
+            st.metric(label, value)
+
+
 def render_app_shell() -> None:
     """Apply minimal page styling and result card layout."""
     st.html(
@@ -208,22 +238,6 @@ def render_app_shell() -> None:
             @keyframes fadeSlideIn {
                 from { opacity: 0; transform: translateY(10px); }
                 to { opacity: 1; transform: translateY(0); }
-            }
-
-            .app-title {
-                color: #0f172a;
-                font-size: 1.75rem;
-                font-weight: 700;
-                line-height: 1.2;
-                margin: 0 0 0.35rem 0;
-            }
-
-            .app-subtitle {
-                color: #475569;
-                font-size: 0.98rem;
-                line-height: 1.55;
-                margin-bottom: 1rem;
-                max-width: 760px;
             }
 
             .section-title {
@@ -272,10 +286,6 @@ def render_app_shell() -> None:
                 margin-bottom: 0.85rem;
             }
         </style>
-        <div class="app-title">Branched Root Cause Analyzer</div>
-        <div class="app-subtitle">
-            Upload your dataset and review a structured variance drill-down with executive commentary.
-        </div>
         """
     )
 
@@ -396,10 +406,21 @@ if uploaded_file is not None and "df" in locals():
                 result = app_graph.invoke(inputs)
 
                 st.markdown("---")
-
+                
                 if "aborted" in result["final_summary"].lower() or "error" in result["final_summary"].lower():
                     st.error(result["final_summary"])
                 else:
+                    total_variance_label = result["path_trace"][0].replace("Overall Total Variance: ", "")
+                    primary_branch_count = len(result.get("tree_data", []))
+                    final_node_count = count_leaf_nodes(result.get("tree_data", []))
+
+                    render_kpi_cards(
+                        total_variance_label=total_variance_label,
+                        hierarchy_count=len(hierarchy),
+                        primary_branch_count=primary_branch_count,
+                        final_node_count=final_node_count,
+                    )
+
                     col_left, col_right = st.columns(2)
 
                     with col_left:
