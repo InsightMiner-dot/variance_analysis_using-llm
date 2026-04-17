@@ -189,17 +189,17 @@ def generate_ppt_deck(total_variance: str, summary: str, tree_data: List[Dict[st
         clean_text = para.lstrip('-*1234567890. ')
         
         if is_bullet:
-            p.text = f"  •  {clean_text}" # Render proper bullet
+            p.text = f"  •  {clean_text}"
             p.font.size = Pt(14)
             p.font.bold = False
             p.font.color.rgb = text_color
         else:
             p.text = clean_text
             p.font.size = Pt(16)
-            p.font.bold = True # Bold for headers and primary categories
+            p.font.bold = True
             p.font.color.rgb = primary_color
 
-    # --- SLIDE 3: PRIMARY DRIVERS BREAKDOWN (TREE) ---
+    # --- SLIDE 3: PRIMARY DRIVERS BREAKDOWN ---
     slide3 = prs.slides.add_slide(blank_slide_layout)
     add_corporate_header(slide3, "Recursive Drill-Down Drivers", primary_color, accent_color)
     
@@ -320,7 +320,6 @@ def calculate_variance_node(state: AgentState) -> Dict[str, Any]:
 def synthesize_insight_node(state: AgentState) -> Dict[str, Any]:
     if state["path_trace"] and "Error:" in state["path_trace"][0]: return {"final_summary": "Analysis aborted."}
     
-    # REVERTED: Using standard .env API Key auth
     llm = AzureChatOpenAI(
         azure_endpoint=os.getenv("AZURE_OPENAI_ENDPOINT"),
         api_key=os.getenv("AZURE_OPENAI_KEY"),
@@ -331,13 +330,10 @@ def synthesize_insight_node(state: AgentState) -> Dict[str, Any]:
     system_prompt = (
         "You are a strict, professional financial data analyst. Review the provided variance data and generate a report formatted EXACTLY as follows:\n\n"
         "Executive Summary:\n"
-        "[1-2 sentence overall conclusion regarding the total variance.]\n\n"
-        "Primary Categories:\n"
-        "[Name of Category 1]\n"
-        "- [Driver 1 with exact variance amount]\n"
-        "- [Driver 2 with exact variance amount]\n\n"
+        "1. A brief 1-2 sentence overall conclusion regarding the total variance.\n"
+        "2. A bulleted breakdown for each 'Primary Category' analyzed. Under each, list the Top 5 reasons/drivers provided, along with exact variance amounts.\n\n"
         "Root Cause Analysis:\n"
-        "[Provide a detailed 4 to 5 line analytical paragraph explaining the underlying root causes of the variance based strictly on the provided data.]\n\n"
+        "Provide a detailed 4 to 5 line analytical paragraph explaining the underlying root causes of the variance based strictly on the provided data.\n\n"
         "Do not add conversational filler."
     )
     messages = [SystemMessage(content=system_prompt), HumanMessage(content=f"Filtered Final Level Data:\n{chr(10).join(state['final_level_data'])}")]
@@ -461,6 +457,13 @@ with tab1:
                 st.error(result["final_summary"])
             else:
                 total_var = result["path_trace"][0].replace("Overall Total Variance: ", "")
+                
+                # Split AI Summary for UI
+                parts = re.split(r'Root\s+Cause\s+Analysis:', result["final_summary"], flags=re.IGNORECASE)
+                exec_summary = parts[0].replace('Executive Summary:', '').strip()
+                rca_text = parts[1].strip() if len(parts) > 1 else "Root cause analysis generation failed."
+
+                # KPI Cards
                 col1, col2, col3, col4 = st.columns(4)
                 col1.metric("Total Variance", total_var)
                 col2.metric("Hierarchy Levels", str(len(st.session_state.current_hierarchy)))
@@ -468,10 +471,18 @@ with tab1:
                 col4.metric("Final Nodes", str(count_leaf_nodes(result.get("tree_data", []))))
 
                 st.markdown("<br>", unsafe_allow_html=True)
+                
+                # --- ROOT CAUSE ANALYSIS CARD (TOP) ---
+                st.markdown("### 🔍 Root Cause Analysis")
+                st.success(rca_text)
+
+                st.markdown("<br>", unsafe_allow_html=True)
+
+                # --- EXECUTIVE SUMMARY & DRILL DOWN (SIDE BY SIDE) ---
                 col_left, col_right = st.columns(2)
                 with col_left:
-                    st.subheader("AI Analysis Report")
-                    st.info(result["final_summary"])
+                    st.subheader("Executive Summary")
+                    st.info(exec_summary)
                 with col_right:
                     st.subheader("Recursive Drill-Down Trace")
                     st.caption(result["path_trace"][0])
@@ -534,7 +545,6 @@ with tab2:
             with st.chat_message("assistant"):
                 st_callback = StreamlitCallbackHandler(st.container())
                 try:
-                    # REVERTED: Using standard .env API Key auth
                     llm_chat = AzureChatOpenAI(
                         azure_endpoint=os.getenv("AZURE_OPENAI_ENDPOINT"),
                         api_key=os.getenv("AZURE_OPENAI_KEY"),
