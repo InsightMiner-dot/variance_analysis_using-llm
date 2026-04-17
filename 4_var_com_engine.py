@@ -200,107 +200,6 @@ def render_trace_tree(nodes: List[Dict[str, Any]]) -> None:
             st.markdown(f"- {node['title']}")
 
 
-def initialize_hierarchy_state(all_cols: List[str], default_hierarchy: List[str], source_key: str) -> None:
-    """Reset hierarchy ordering when the uploaded dataset changes."""
-    if st.session_state.get("hierarchy_source_key") != source_key:
-        st.session_state["hierarchy_source_key"] = source_key
-        st.session_state["hierarchy_order"] = [col for col in default_hierarchy if col in all_cols]
-
-    st.session_state["hierarchy_order"] = [
-        col for col in st.session_state.get("hierarchy_order", []) if col in all_cols
-    ]
-
-
-def add_hierarchy_field(field_name: str) -> None:
-    if field_name and field_name not in st.session_state["hierarchy_order"]:
-        st.session_state["hierarchy_order"].append(field_name)
-
-
-def reset_hierarchy_fields(all_cols: List[str], default_hierarchy: List[str]) -> None:
-    st.session_state["hierarchy_order"] = [col for col in default_hierarchy if col in all_cols]
-
-
-def move_hierarchy_field(index: int, direction: int) -> None:
-    target_index = index + direction
-    order = st.session_state["hierarchy_order"]
-    if 0 <= index < len(order) and 0 <= target_index < len(order):
-        order[index], order[target_index] = order[target_index], order[index]
-        st.session_state["hierarchy_order"] = order
-
-
-def remove_hierarchy_field(index: int) -> None:
-    order = st.session_state["hierarchy_order"]
-    if 0 <= index < len(order):
-        order.pop(index)
-        st.session_state["hierarchy_order"] = order
-
-
-def render_hierarchy_order_fallback() -> None:
-    st.caption("Drag-and-drop mode can be enabled later with a sortable Streamlit component.")
-    st.markdown("#### Current Order")
-
-    for idx, col_name in enumerate(st.session_state["hierarchy_order"]):
-        row_cols = st.columns([5, 1, 1, 1])
-        with row_cols[0]:
-            if idx == 0:
-                level_label = "Root level"
-            elif idx == len(st.session_state["hierarchy_order"]) - 1:
-                level_label = "Final level"
-            else:
-                level_label = "Middle level"
-
-            st.markdown(f"**{idx + 1}. {col_name}**")
-            st.caption(level_label)
-        with row_cols[1]:
-            if st.button("Up", key=f"hierarchy_up_{idx}", use_container_width=True, disabled=idx == 0):
-                move_hierarchy_field(idx, -1)
-                st.rerun()
-        with row_cols[2]:
-            last_idx = len(st.session_state["hierarchy_order"]) - 1
-            if st.button("Down", key=f"hierarchy_down_{idx}", use_container_width=True, disabled=idx == last_idx):
-                move_hierarchy_field(idx, 1)
-                st.rerun()
-        with row_cols[3]:
-            if st.button("Remove", key=f"hierarchy_remove_{idx}", use_container_width=True):
-                remove_hierarchy_field(idx)
-                st.rerun()
-
-
-def render_hierarchy_selector(all_cols: List[str], default_hierarchy: List[str], source_key: str) -> List[str]:
-    """Render an ordered hierarchy picker with add, remove, and reorder actions."""
-    initialize_hierarchy_state(all_cols, default_hierarchy, source_key)
-
-    st.markdown("### Select Hierarchy Flow")
-    st.caption("Arrange fields from left to right. Root is first, final drill-down level is last.")
-
-    remaining_cols = [col for col in all_cols if col not in st.session_state["hierarchy_order"]]
-    add_col_left, add_col_right, add_col_reset = st.columns([3, 1, 1])
-
-    with add_col_left:
-        selected_to_add = st.selectbox(
-            "Add hierarchy field",
-            options=remaining_cols if remaining_cols else ["No more fields available"],
-            disabled=not remaining_cols,
-            key="hierarchy_add_select",
-        )
-    with add_col_right:
-        if st.button("Add", use_container_width=True, disabled=not remaining_cols):
-            add_hierarchy_field(selected_to_add)
-            st.rerun()
-    with add_col_reset:
-        if st.button("Reset", use_container_width=True):
-            reset_hierarchy_fields(all_cols, default_hierarchy)
-            st.rerun()
-
-    if not st.session_state["hierarchy_order"]:
-        st.warning("No hierarchy selected yet. Add one or more fields to continue.")
-        return []
-
-    render_hierarchy_order_fallback()
-
-    return st.session_state["hierarchy_order"]
-
-
 # ==========================================
 # 4. STREAMLIT UI (SIDEBAR CONFIG)
 # ==========================================
@@ -345,8 +244,17 @@ with st.sidebar:
                 base_scenario = st.selectbox("Select Base Scenario (e.g. 2024_ACT)", num_cols)
                 compare_scenario = st.selectbox("Select Compare Scenario (e.g. 2025_FC2+10)", num_cols)
 
+            st.header("3. Select Hierarchy")
             cat_cols = df.select_dtypes(include=["object", "string", "category"]).columns.tolist()
             all_cols = df.columns.tolist()
+            hierarchy = st.multiselect(
+                "Hierarchy Flow (Left to Right)",
+                options=all_cols,
+                default=cat_cols,
+                help="The bot will group by the first column, recursively drill through the middle, and report from the LAST column.",
+            )
+
+            run_analysis = st.button("Generate Commentary", type="primary", use_container_width=True)
 
         except Exception as e:
             st.error(f"Error loading file: {e}")
@@ -356,11 +264,6 @@ with st.sidebar:
 if uploaded_file is not None and "df" in locals():
     st.write("### Data Preview")
     st.dataframe(df.head(3))
-
-    hierarchy_source_key = f"{uploaded_file.name}:{','.join(df.columns.astype(str))}"
-    hierarchy = render_hierarchy_selector(all_cols, cat_cols, hierarchy_source_key)
-
-    run_analysis = st.button("Generate Commentary", type="primary", use_container_width=True)
 
     if run_analysis:
         if not hierarchy:
