@@ -511,7 +511,7 @@ with tab1:
 
                 st.markdown("<br>", unsafe_allow_html=True)
                 
-                # --- ROW 1: EXECUTIVE SUMMARY & DRILL DOWN ---
+                # --- ROW 1: EXECUTIVE SUMMARY & DRILL DOWN (SIDE BY SIDE) ---
                 col_left, col_right = st.columns(2)
                 with col_left:
                     st.subheader("Executive Summary")
@@ -521,17 +521,17 @@ with tab1:
                     st.caption(result["path_trace"][0])
                     render_trace_tree(result.get("tree_data", []))
 
-                # --- ROW 2: ROOT CAUSE & CATEGORY COMMENTARY (2x2 GRID) ---
-                st.markdown("<br>", unsafe_allow_html=True)
-                col_rca, col_comm = st.columns(2)
-                with col_rca:
-                    if rca_text:
-                        st.subheader("🔍 Root Cause Analysis")
-                        st.success(rca_text)
-                with col_comm:
-                    if comm_text:
-                        st.subheader("💡 Category Commentary")
-                        st.info(comm_text)
+                # --- ROW 2: ROOT CAUSE ANALYSIS (FULL WIDTH) ---
+                if rca_text:
+                    st.markdown("<br>", unsafe_allow_html=True)
+                    st.subheader("🔍 Root Cause Analysis")
+                    st.success(rca_text)
+
+                # --- ROW 3: CATEGORY COMMENTARY (FULL WIDTH) ---
+                if comm_text:
+                    st.markdown("<br>", unsafe_allow_html=True)
+                    st.subheader("💡 Category Commentary")
+                    st.info(comm_text)
 
                 # --- FEEDBACK MODULE ---
                 st.markdown("---")
