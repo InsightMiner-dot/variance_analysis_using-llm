@@ -230,82 +230,11 @@ def render_kpi_cards(
             st.metric(label, value)
 
 
-def render_app_shell() -> None:
-    """Apply minimal page styling and result card layout."""
-    st.html(
-        """
-        <style>
-            @keyframes fadeSlideIn {
-                from { opacity: 0; transform: translateY(10px); }
-                to { opacity: 1; transform: translateY(0); }
-            }
-
-            .section-title {
-                color: #0f172a;
-                font-size: 1.12rem;
-                font-weight: 700;
-                margin: 0.15rem 0 0.2rem 0;
-            }
-
-            .section-subtitle {
-                color: #64748b;
-                font-size: 0.92rem;
-                margin-bottom: 0.55rem;
-            }
-
-            .block-card {
-                border: 1px solid rgba(30, 41, 59, 0.08);
-                border-radius: 14px;
-                padding: 0.8rem 0.95rem 0.3rem 0.95rem;
-                background: #ffffff;
-                box-shadow: 0 8px 24px rgba(15, 23, 42, 0.05);
-                margin-bottom: 0.85rem;
-                animation: fadeSlideIn 0.45s ease-out;
-            }
-
-            .result-card {
-                border: 1px solid rgba(15, 23, 42, 0.08);
-                border-radius: 18px;
-                background: #ffffff;
-                box-shadow: 0 14px 34px rgba(15, 23, 42, 0.06);
-                padding: 1rem 1rem 0.9rem 1rem;
-                margin-bottom: 1rem;
-                animation: fadeSlideIn 0.45s ease-out;
-            }
-        </style>
-        """
-    )
-
-
-def render_section_header(title: str, subtitle: str) -> None:
-    st.html(
-        f"""
-        <div class="block-card">
-            <div class="section-title">{title}</div>
-            <div class="section-subtitle">{subtitle}</div>
-        </div>
-        """
-    )
-
-
-def open_result_card() -> None:
-    st.html(
-        """
-        <div class="result-card">
-        """
-    )
-
-
-def close_result_card() -> None:
-    st.html("</div>")
-
-
 # ==========================================
 # 4. STREAMLIT UI (SIDEBAR CONFIG)
 # ==========================================
 st.set_page_config(page_title="Branched Variance Analyzer", layout="wide")
-
-render_app_shell()
+st.title("Branched Root Cause Analyzer")
 
 # SIDEBAR CONTROLS
 with st.sidebar:
@@ -349,16 +278,10 @@ with st.sidebar:
 
 # MAIN PAGE DISPLAY
 if uploaded_file is not None and "df" in locals():
-    render_section_header(
-        "Data Preview",
-        "Review the incoming dataset before selecting the hierarchy flow.",
-    )
+    st.write("### Data Preview")
     st.dataframe(df.head(3))
 
-    render_section_header(
-        "3. Select Hierarchy",
-        "Choose the hierarchy order from left to right for the recursive drill-down.",
-    )
+    st.write("### 3. Select Hierarchy")
     hierarchy = st.multiselect(
         "Hierarchy Flow (Left to Right)",
         options=all_cols,
@@ -410,13 +333,9 @@ if uploaded_file is not None and "df" in locals():
 
                     with col_left:
                         st.write("### Executive Summary")
-                        open_result_card()
                         st.write(result["final_summary"])
-                        close_result_card()
 
                     with col_right:
                         st.write("### Recursive Drill-Down Trace")
-                        open_result_card()
                         st.info(result["path_trace"][0])
                         render_trace_tree(result.get("tree_data", []))
-                        close_result_card()
