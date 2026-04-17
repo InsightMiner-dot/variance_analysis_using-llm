@@ -244,17 +244,8 @@ with st.sidebar:
                 base_scenario = st.selectbox("Select Base Scenario (e.g. 2024_ACT)", num_cols)
                 compare_scenario = st.selectbox("Select Compare Scenario (e.g. 2025_FC2+10)", num_cols)
 
-            st.header("3. Select Hierarchy")
             cat_cols = df.select_dtypes(include=["object", "string", "category"]).columns.tolist()
             all_cols = df.columns.tolist()
-            hierarchy = st.multiselect(
-                "Hierarchy Flow (Left to Right)",
-                options=all_cols,
-                default=cat_cols,
-                help="The bot will group by the first column, recursively drill through the middle, and report from the LAST column.",
-            )
-
-            run_analysis = st.button("Generate Commentary", type="primary", use_container_width=True)
 
         except Exception as e:
             st.error(f"Error loading file: {e}")
@@ -264,6 +255,16 @@ with st.sidebar:
 if uploaded_file is not None and "df" in locals():
     st.write("### Data Preview")
     st.dataframe(df.head(3))
+
+    st.markdown("### 3. Select Hierarchy")
+    hierarchy = st.multiselect(
+        "Hierarchy Flow (Left to Right)",
+        options=all_cols,
+        default=cat_cols,
+        help="The bot will group by the first column, recursively drill through the middle, and report from the LAST column.",
+    )
+
+    run_analysis = st.button("Generate Commentary", type="primary", use_container_width=True)
 
     if run_analysis:
         if not hierarchy:
