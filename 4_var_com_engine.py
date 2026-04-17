@@ -11,6 +11,7 @@ from dotenv import load_dotenv
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_openai import AzureChatOpenAI
 from langgraph.graph import END, START, StateGraph
+from langchain_experimental.agents.agent_toolkits import create_pandas_dataframe_agent
 
 # Load environment variables
 load_dotenv()
@@ -19,42 +20,86 @@ load_dotenv()
 # 0. BACKEND DATABASE SETUP (SQLITE)
 # ==========================================
 def init_db():
-    """Initialize a local SQLite database to store history."""
     conn = sqlite3.connect("analysis_history.db")
     c = conn.cursor()
+    
+    # Create runs table (Analysis)
     c.execute('''CREATE TABLE IF NOT EXISTS runs
                  (id INTEGER PRIMARY KEY AUTOINCREMENT,
                   timestamp TEXT,
                   filename TEXT,
                   hierarchy TEXT,
                   total_variance TEXT,
-                  summary TEXT)''')
+                  summary TEXT,
+                  feedback INTEGER DEFAULT 0)''') # 0: None, 1: Up, -1: Down
+                  
+    # Gracefully upgrade existing DB if it doesn't have the feedback column
+    try:
+        c.execute("ALTER TABLE runs ADD COLUMN feedback INTEGER DEFAULT 0")
+    except sqlite3.OperationalError:
+        pass # Column already exists
+        
+    # Create chat logs table
+    c.execute('''CREATE TABLE IF NOT EXISTS chat_logs
+                 (id INTEGER PRIMARY KEY AUTOINCREMENT,
+                  timestamp TEXT,
+                  prompt TEXT,
+                  response TEXT,
+                  feedback INTEGER DEFAULT 0)''')
+                  
     conn.commit()
     conn.close()
 
-def save_run_to_db(filename: str, hierarchy: List[str], total_variance: str, summary: str):
-    """Save a completed analysis run to the backend."""
+def save_run_to_db(filename: str, hierarchy: List[str], total_variance: str, summary: str) -> int:
     conn = sqlite3.connect("analysis_history.db")
     c = conn.cursor()
     c.execute("INSERT INTO runs (timestamp, filename, hierarchy, total_variance, summary) VALUES (?, ?, ?, ?, ?)",
-              (datetime.now().strftime("%Y-%m-%d %H:%M:%S"), 
-               filename, 
-               json.dumps(hierarchy), 
-               total_variance, 
-               summary))
+              (datetime.now().strftime("%Y-%m-%d %H:%M:%S"), filename, json.dumps(hierarchy), total_variance, summary))
+    run_id = c.lastrowid
+    conn.commit()
+    conn.close()
+    return run_id
+
+def update_run_feedback(run_id: int, feedback: int):
+    conn = sqlite3.connect("analysis_history.db")
+    c = conn.cursor()
+    c.execute("UPDATE runs SET feedback = ? WHERE id = ?", (feedback, run_id))
+    conn.commit()
+    conn.close()
+
+def save_chat_to_db(prompt: str, response: str) -> int:
+    conn = sqlite3.connect("analysis_history.db")
+    c = conn.cursor()
+    c.execute("INSERT INTO chat_logs (timestamp, prompt, response) VALUES (?, ?, ?)",
+              (datetime.now().strftime("%Y-%m-%d %H:%M:%S"), prompt, response))
+    chat_id = c.lastrowid
+    conn.commit()
+    conn.close()
+    return chat_id
+
+def update_chat_feedback(chat_id: int, feedback: int):
+    conn = sqlite3.connect("analysis_history.db")
+    c = conn.cursor()
+    c.execute("UPDATE chat_logs SET feedback = ? WHERE id = ?", (feedback, chat_id))
     conn.commit()
     conn.close()
 
 def fetch_history_from_db() -> pd.DataFrame:
-    """Retrieve all historical runs."""
     conn = sqlite3.connect("analysis_history.db")
     df = pd.read_sql_query("SELECT * FROM runs ORDER BY timestamp DESC", conn)
     conn.close()
     return df
 
-# Initialize database on app startup
 init_db()
 
+# Callback functions for UI buttons
+def handle_run_feedback_click(run_id: int, score: int):
+    update_run_feedback(run_id, score)
+    st.toast("✅ Analysis feedback recorded!")
+
+def handle_chat_feedback_click(chat_id: int, score: int):
+    update_chat_feedback(chat_id, score)
+    st.toast("✅ Chat feedback recorded!")
 
 # ==========================================
 # 1. LANGGRAPH STATE DEFINITION
@@ -74,7 +119,6 @@ class AgentState(TypedDict):
 # ==========================================
 # 2. LANGGRAPH NODES
 # ==========================================
-# [Your calculate_variance_node and synthesize_insight_node remain EXACTLY the same]
 def calculate_variance_node(state: AgentState) -> Dict[str, Any]:
     df = state["df"].copy()
     hierarchy = state.get("hierarchy_cols", [])
@@ -145,7 +189,6 @@ def calculate_variance_node(state: AgentState) -> Dict[str, Any]:
     final_level_data.extend(tree_final)
     return {"path_trace": path_trace, "final_level_data": final_level_data, "tree_data": tree_nodes}
 
-
 def synthesize_insight_node(state: AgentState) -> Dict[str, Any]:
     if state["path_trace"] and "Error:" in state["path_trace"][0]:
         return {"final_summary": "Analysis aborted due to invalid data configuration."}
@@ -166,7 +209,6 @@ def synthesize_insight_node(state: AgentState) -> Dict[str, Any]:
     messages = [SystemMessage(content=system_prompt), HumanMessage(content=f"Filtered Final Level Data:\n{chr(10).join(state['final_level_data'])}")]
     response = llm.invoke(messages)
     return {"final_summary": response.content}
-
 
 # ==========================================
 # 3. GRAPH COMPILATION & UI HELPERS
@@ -198,22 +240,25 @@ def count_leaf_nodes(nodes: List[Dict[str, Any]]) -> int:
             leaf_count += 1
     return leaf_count
 
-
 # ==========================================
 # 4. STREAMLIT UI WITH SESSION STATE
 # ==========================================
 st.set_page_config(page_title="Branched Variance Analyzer", layout="wide")
 
-# Initialize session state for analysis results
+# Initialize session state variables
 if "analysis_result" not in st.session_state:
     st.session_state.analysis_result = None
 if "current_hierarchy" not in st.session_state:
     st.session_state.current_hierarchy = None
+if "current_run_id" not in st.session_state:
+    st.session_state.current_run_id = None
+if "chat_history" not in st.session_state:
+    st.session_state.chat_history = []
 
 st.title("📊 Branched Root Cause Analyzer")
 
-# Create tabs for UI organization
-tab1, tab2 = st.tabs(["🚀 New Analysis", "🗄️ Run History"])
+# Create 3 tabs for UI organization
+tab1, tab2, tab3 = st.tabs(["🚀 New Analysis", "🗄️ Run History", "💬 Chat with Data"])
 
 with st.sidebar:
     st.header("1. Upload Data")
@@ -262,12 +307,10 @@ with tab1:
             "Hierarchy Flow (Left to Right)",
             options=all_cols,
             default=cat_cols,
-            help="The bot will group by the first column, recursively drill through the middle, and report from the LAST column.",
         )
 
         run_analysis = st.button("Generate Commentary", type="primary", use_container_width=True)
 
-        # Execution block updates session_state
         if run_analysis:
             if not hierarchy:
                 st.warning("Please select at least one column for the hierarchy.")
@@ -287,22 +330,16 @@ with tab1:
                         "compare_scenario": compare_scenario,
                     }
                     
-                    # Store results in session state so they survive reruns
                     st.session_state.analysis_result = app_graph.invoke(inputs)
                     st.session_state.current_hierarchy = hierarchy
                     
-                    # Log to backend database
                     if "aborted" not in st.session_state.analysis_result["final_summary"].lower():
                         total_var = st.session_state.analysis_result["path_trace"][0].replace("Overall Total Variance: ", "")
-                        save_run_to_db(
-                            filename=file_name,
-                            hierarchy=hierarchy,
-                            total_variance=total_var,
-                            summary=st.session_state.analysis_result["final_summary"]
-                        )
+                        # Save to DB and capture the ID
+                        run_id = save_run_to_db(file_name, hierarchy, total_var, st.session_state.analysis_result["final_summary"])
+                        st.session_state.current_run_id = run_id
                         st.toast("✅ Analysis Complete & Saved to History!")
 
-        # Display results from session_state (Persists when clicking tree expanders)
         if st.session_state.analysis_result:
             result = st.session_state.analysis_result
             st.markdown("---")
@@ -310,11 +347,21 @@ with tab1:
             if "aborted" in result["final_summary"].lower() or "error" in result["final_summary"].lower():
                 st.error(result["final_summary"])
             else:
+                # FEEDBACK MODULE - Analysis
+                if st.session_state.current_run_id:
+                    st.markdown("##### How did the AI perform on this analysis?")
+                    col_f1, col_f2, _ = st.columns([1, 1, 10])
+                    col_f1.button("👍", key=f"run_up_{st.session_state.current_run_id}", 
+                                  on_click=handle_run_feedback_click, args=(st.session_state.current_run_id, 1))
+                    col_f2.button("👎", key=f"run_down_{st.session_state.current_run_id}", 
+                                  on_click=handle_run_feedback_click, args=(st.session_state.current_run_id, -1))
+                
+                st.markdown("<br>", unsafe_allow_html=True)
+                
                 total_variance_label = result["path_trace"][0].replace("Overall Total Variance: ", "")
                 primary_branch_count = len(result.get("tree_data", []))
                 final_node_count = count_leaf_nodes(result.get("tree_data", []))
 
-                # KPI Cards
                 col1, col2, col3, col4 = st.columns(4)
                 col1.metric("Total Variance", total_variance_label)
                 col2.metric("Hierarchy Levels", str(len(st.session_state.current_hierarchy)))
@@ -331,7 +378,6 @@ with tab1:
                 with col_right:
                     st.subheader("Recursive Drill-Down Trace")
                     st.caption(result["path_trace"][0])
-                    # Rendering the tree will no longer clear the page on click!
                     render_trace_tree(result.get("tree_data", []))
     else:
         st.info("👈 Please upload a data file in the sidebar to begin.")
@@ -344,19 +390,71 @@ with tab2:
     if history_df.empty:
         st.write("No history found. Run an analysis to generate logs!")
     else:
-        # Display summary table of runs
-        st.dataframe(
-            history_df[["id", "timestamp", "filename", "total_variance"]], 
-            use_container_width=True, 
-            hide_index=True
-        )
+        # Format the feedback column for better visual display in the dataframe
+        history_df['feedback_status'] = history_df['feedback'].map({1: '👍', -1: '👎', 0: '➖'})
+        st.dataframe(history_df[["id", "timestamp", "filename", "total_variance", "feedback_status"]], use_container_width=True, hide_index=True)
         
-        st.markdown("### View Past Summary")
-        run_ids = history_df["id"].tolist()
-        selected_run = st.selectbox("Select a Run ID to view details:", run_ids)
-        
+        selected_run = st.selectbox("Select a Run ID to view details:", history_df["id"].tolist())
         if selected_run:
             run_details = history_df[history_df["id"] == selected_run].iloc[0]
             st.markdown(f"**Filename:** `{run_details['filename']}` | **Ran at:** `{run_details['timestamp']}`")
-            st.markdown(f"**Hierarchy Used:** `{run_details['hierarchy']}`")
+            st.markdown(f"**Current Feedback Score:** `{run_details['feedback_status']}`")
             st.info(run_details['summary'])
+
+# --- TAB 3: CHAT WITH DATA ---
+with tab3:
+    if uploaded_file is not None and "df" in locals():
+        st.markdown("### 💬 Ask Questions About Your Data")
+        
+        # Render existing chat history
+        for idx, msg in enumerate(st.session_state.chat_history):
+            with st.chat_message(msg["role"]):
+                st.markdown(msg["content"])
+                
+                # FEEDBACK MODULE - Chat (Only for assistant messages that have been saved to DB)
+                if msg["role"] == "assistant" and "db_id" in msg:
+                    f1, f2, _ = st.columns([1, 1, 10])
+                    f1.button("👍", key=f"chat_up_{msg['db_id']}_{idx}", 
+                              on_click=handle_chat_feedback_click, args=(msg["db_id"], 1))
+                    f2.button("👎", key=f"chat_down_{msg['db_id']}_{idx}", 
+                              on_click=handle_chat_feedback_click, args=(msg["db_id"], -1))
+
+        # Chat Input
+        if prompt := st.chat_input("Ask your dataset a question..."):
+            st.session_state.chat_history.append({"role": "user", "content": prompt})
+            with st.chat_message("user"):
+                st.markdown(prompt)
+
+            # Generate Assistant response
+            with st.chat_message("assistant"):
+                with st.spinner("Analyzing dataset..."):
+                    try:
+                        llm_chat = AzureChatOpenAI(
+                            azure_endpoint=os.getenv("AZURE_OPENAI_ENDPOINT"),
+                            api_key=os.getenv("AZURE_OPENAI_KEY"),
+                            azure_deployment=os.getenv("AZURE_OPENAI_DEPLOYMENT"),
+                            api_version=os.getenv("AZURE_OPENAI_API_VERSION"),
+                            temperature=0,
+                        )
+                        
+                        agent = create_pandas_dataframe_agent(
+                            llm_chat,
+                            df,
+                            verbose=True,
+                            agent_type="openai-functions",
+                            allow_dangerous_code=True 
+                        )
+                        
+                        response = agent.invoke({"input": prompt})
+                        answer = response["output"]
+                        st.markdown(answer)
+                        
+                        # Save Q&A to database and attach the ID to session state for feedback linking
+                        chat_id = save_chat_to_db(prompt, answer)
+                        st.session_state.chat_history.append({"role": "assistant", "content": answer, "db_id": chat_id})
+                        st.rerun() # Forces a rerun so the new feedback buttons appear immediately
+                        
+                    except Exception as e:
+                        st.error(f"Failed to query data: {e}")
+    else:
+        st.info("👈 Please upload a data file in the sidebar to chat with it.")
