@@ -22,40 +22,41 @@ class AgentState(TypedDict):
     base_scenario: str
     compare_scenario: str
     path_trace: List[str]
+    final_level_data: List[str]  # NEW: Strict data just for the LLM Summary
     final_summary: str
 
 # ==========================================
 # 2. LANGGRAPH NODES
 # ==========================================
 def calculate_variance_node(state: AgentState) -> Dict[str, Any]:
-    """Branched Drill-Down: Loops through primary categories and drills down to the final reason."""
+    """Branched Drill-Down: Separates full trace (for UI) and strict final data (for LLM)."""
     df = state["df"].copy()
     hierarchy = state.get("hierarchy_cols", [])
     has_var = state.get("has_variance_col", True)
     
     path_trace = []
+    final_level_data = [] # Stores ONLY primary cat and last column
     
     if not hierarchy:
-        return {"path_trace": ["⚠️ Error: No hierarchy columns selected."]}
+        return {"path_trace": ["⚠️ Error: No hierarchy columns selected."], "final_level_data": []}
         
-    # Determine the target column for calculation
     if has_var:
         target_col = state.get("variance_col")
         if target_col not in df.columns:
-            return {"path_trace": [f"⚠️ Error: Target column '{target_col}' not found."]}
+            return {"path_trace": [f"⚠️ Error: Target column '{target_col}' not found."], "final_level_data": []}
     else:
         base_col = state.get("base_scenario")
         comp_col = state.get("compare_scenario")
         if base_col not in df.columns or comp_col not in df.columns:
-             return {"path_trace": ["⚠️ Error: Scenario columns not found."]}
+             return {"path_trace": ["⚠️ Error: Scenario columns not found."], "final_level_data": []}
         
-        # Calculate dynamic variance
         target_col = "Calculated_Variance"
         df[target_col] = df[base_col] - df[comp_col]
 
     # Calculate global total variance in Millions
     total_variance = df[target_col].fillna(0).sum()
     path_trace.append(f"**Overall Total Variance: {total_variance / 1e6:,.2f}M**\n")
+    final_level_data.append(f"Overall Total Variance: {total_variance / 1e6:,.2f}M")
 
     first_level = hierarchy[0]
     
@@ -69,13 +70,17 @@ def calculate_variance_node(state: AgentState) -> Dict[str, Any]:
         path_trace.append(f"🔹 **Primary Category: '{primary_cat}'** (Total: {primary_val / 1e6:,.2f}M)")
         path_trace.append(f"=========================================\n")
         
+        final_level_data.append(f"\nPrimary Category: '{primary_cat}' (Total Variance: {primary_val / 1e6:,.2f}M)")
+        
         current_df = df[df[first_level] == primary_cat]
         
         # If there is only one level selected, just list its top drivers
         if len(hierarchy) == 1:
              path_trace.append(f"--- **FINAL LEVEL: Top 5 Reasons in '{first_level}'** ---")
+             final_level_data.append("Final Level Top 5 Drivers:")
              for idx, (name, val) in enumerate(top_primary_categories.items(), 1):
                  path_trace.append(f"  {idx}. '{name}': {val / 1e6:,.2f}M")
+                 final_level_data.append(f"  - {name}: {val / 1e6:,.2f}M")
              continue
 
         # Drill down through the REMAINING levels of the hierarchy
@@ -93,14 +98,17 @@ def calculate_variance_node(state: AgentState) -> Dict[str, Any]:
             # Get Top 5 drivers for this specific branch
             top_5 = grouped.reindex(grouped.abs().sort_values(ascending=False).index).head(5)
             
-            # Explicitly flag the final level for the LLM to extract
             if is_last_level:
                 path_trace.append(f"--- **FINAL LEVEL: Top 5 Reasons in '{level}' (Inside {primary_cat})** ---")
+                final_level_data.append(f"Final Level ({level}) Top 5 Drivers:")
             else:
                 path_trace.append(f"--- **Top 5 Drivers in '{level}' (Inside {primary_cat})** ---")
                 
             for idx, (name, val) in enumerate(top_5.items(), 1):
                 path_trace.append(f"  {idx}. '{name}': {val / 1e6:,.2f}M")
+                # ONLY append to final_level_data if it is the absolute last column
+                if is_last_level:
+                    final_level_data.append(f"  - {name}: {val / 1e6:,.2f}M")
                 
             if is_last_level:
                 break # We reached the end, no need to filter further
@@ -116,10 +124,10 @@ def calculate_variance_node(state: AgentState) -> Dict[str, Any]:
             
         path_trace.append("\n") 
         
-    return {"path_trace": path_trace}
+    return {"path_trace": path_trace, "final_level_data": final_level_data}
 
 def synthesize_insight_node(state: AgentState) -> Dict[str, Any]:
-    """Azure OpenAI generates an executive summary focusing on the final reasons."""
+    """Azure OpenAI generates an executive summary using ONLY the strict final column data."""
     
     if state["path_trace"] and "⚠️ Error" in state["path_trace"][0]:
         return {"final_summary": "Analysis aborted due to invalid data configuration."}
@@ -131,23 +139,22 @@ def synthesize_insight_node(state: AgentState) -> Dict[str, Any]:
         api_version=os.getenv("AZURE_OPENAI_API_VERSION")
     )
 
-    # Updated Prompt: Force the LLM to list the final level top 5 for each primary category
     system_prompt = (
-        "You are a strict, professional financial data analyst. You are reviewing a branched variance "
-        "analysis trace. All values are in Millions (M).\n\n"
+        "You are a strict, professional financial data analyst. You are reviewing variance data. "
+        "All values are in Millions (M).\n\n"
         "Provide an Executive Summary formatted EXACTLY as follows:\n"
         "1. A brief 1-2 sentence overall conclusion regarding the total variance.\n"
         "2. A bulleted breakdown for each 'Primary Category' analyzed. Under each Primary Category, "
-        "explicitly list the Top 5 reasons/drivers specifically from the 'FINAL LEVEL' identified in the trace, "
-        "along with their exact variance amounts.\n\n"
+        "explicitly list the Top 5 reasons/drivers provided in the data, along with their exact variance amounts.\n\n"
         "Do not add conversational filler. Keep it structured and easy for an executive to read."
     )
     
-    trace_text = "\n".join(state["path_trace"])
+    # CRITICAL FIX: We only feed the LLM the filtered data, so it cannot hallucinate intermediate steps
+    trace_text = "\n".join(state["final_level_data"])
     
     messages = [
         SystemMessage(content=system_prompt),
-        HumanMessage(content=f"Raw Data Trace:\n{trace_text}")
+        HumanMessage(content=f"Filtered Final Level Data:\n{trace_text}")
     ]
     
     response = llm.invoke(messages)
