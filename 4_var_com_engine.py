@@ -137,7 +137,7 @@ def add_corporate_header(slide, title_text: str, primary_color: RGBColor, accent
     line.line.color.rgb = accent_color
     line.line.width = Pt(2)
 
-def generate_ppt_deck(total_variance: str, exec_summary: str, rca_text: str, tree_data: List[Dict[str, Any]]) -> io.BytesIO:
+def generate_ppt_deck(total_variance: str, exec_summary: str, rca_text: str, comm_text: str, tree_data: List[Dict[str, Any]]) -> io.BytesIO:
     prs = Presentation()
     
     primary_color = RGBColor(14, 43, 92)   
@@ -229,6 +229,31 @@ def generate_ppt_deck(total_variance: str, exec_summary: str, rca_text: str, tre
         p.font.size = Pt(16)
         p.font.bold = False
         p.font.color.rgb = text_color
+
+    # --- SLIDE 5: CATEGORY COMMENTARY ---
+    if comm_text and "generation failed" not in comm_text.lower():
+        slide5 = prs.slides.add_slide(blank_slide_layout)
+        add_corporate_header(slide5, "Category Commentary", primary_color, accent_color)
+        
+        comm_frame = slide5.shapes.add_textbox(Inches(0.5), Inches(1.4), Inches(9), Inches(5.5)).text_frame
+        comm_frame.word_wrap = True
+        
+        clean_comm = clean_markdown_for_ppt(comm_text)
+        comm_lines = [line.strip() for line in clean_comm.split('\n') if line.strip()]
+        
+        for idx, para in enumerate(comm_lines):
+            p = comm_frame.paragraphs[0] if idx == 0 else comm_frame.add_paragraph()
+            
+            if para.startswith('-') or para.startswith('*'):
+                p.text = f"  •  {para.lstrip('-* ')}"
+                p.font.size = Pt(14)
+                p.font.bold = False
+                p.font.color.rgb = text_color
+            else:
+                p.text = para
+                p.font.size = Pt(16)
+                p.font.bold = True
+                p.font.color.rgb = primary_color
 
     ppt_stream = io.BytesIO()
     prs.save(ppt_stream)
@@ -322,13 +347,19 @@ def synthesize_insight_node(state: AgentState) -> Dict[str, Any]:
         api_version=os.getenv("AZURE_OPENAI_API_VERSION"),
     )
     
-    # Restored Original Summary format, with hidden RCA delimiter appended.
     system_prompt = (
         "You are a strict, professional financial data analyst. Provide an Executive Summary formatted EXACTLY as follows:\n"
         "1. A brief 1-2 sentence overall conclusion regarding the total variance.\n"
         "2. A bulleted breakdown for each 'Primary Category' analyzed. Under each, list the Top 5 reasons/drivers provided, along with exact variance amounts.\n\n"
         "---ROOT CAUSE ANALYSIS---\n"
-        "Provide a detailed 4 to 5 line analytical paragraph explaining the underlying root causes of the variance based strictly on the provided data.\n"
+        "Provide a detailed 4 to 5 line analytical paragraph explaining the underlying root causes of the variance based strictly on the provided data.\n\n"
+        "---CATEGORY COMMENTARY---\n"
+        "Act as a Senior Business Partner. For each 'Primary Category', DO NOT just repeat the numbers. Deduce the operational and financial reasons behind the variance based on the sub-categories provided. Provide 4 to 5 deep insights formatted EXACTLY as:\n"
+        "[Primary Category Name]:\n"
+        "- Operational Driver: [Hypothesize the specific business activity or market condition that caused the sub-category variance]\n"
+        "- Financial Impact: [Explain how this specific variance affects profit margins or overall budgets]\n"
+        "- Risk/Opportunity: [Identify if this trend represents a growing risk or an area to capitalize on]\n"
+        "- Recommended Action: [Suggest a specific investigative next step or mitigation strategy for leadership]\n"
         "Do not add conversational filler."
     )
     messages = [SystemMessage(content=system_prompt), HumanMessage(content=f"Filtered Final Level Data:\n{chr(10).join(state['final_level_data'])}")]
@@ -453,10 +484,23 @@ with tab1:
             else:
                 total_var = result["path_trace"][0].replace("Overall Total Variance: ", "")
                 
-                # Split AI Summary to extract the old Exec Summary and the new RCA
-                parts = result["final_summary"].split("---ROOT CAUSE ANALYSIS---")
-                exec_summary = parts[0].strip()
-                rca_text = parts[1].strip() if len(parts) > 1 else "Root cause analysis generation failed."
+                # --- SAFE PARSING LOGIC ---
+                summary_raw = result["final_summary"]
+                exec_summary = summary_raw
+                rca_text = ""
+                comm_text = ""
+                
+                if "---ROOT CAUSE ANALYSIS---" in summary_raw:
+                    parts = summary_raw.split("---ROOT CAUSE ANALYSIS---")
+                    exec_summary = parts[0].replace('Executive Summary:', '').strip()
+                    remainder = parts[1]
+                    
+                    if "---CATEGORY COMMENTARY---" in remainder:
+                        rca_parts = remainder.split("---CATEGORY COMMENTARY---")
+                        rca_text = rca_parts[0].strip()
+                        comm_text = rca_parts[1].strip()
+                    else:
+                        rca_text = remainder.strip()
 
                 # KPI Cards
                 col1, col2, col3, col4 = st.columns(4)
@@ -478,9 +522,16 @@ with tab1:
                     render_trace_tree(result.get("tree_data", []))
 
                 # --- ROOT CAUSE ANALYSIS CARD (BELOW) ---
-                st.markdown("<br>", unsafe_allow_html=True)
-                st.subheader("🔍 Root Cause Analysis")
-                st.success(rca_text)
+                if rca_text:
+                    st.markdown("<br>", unsafe_allow_html=True)
+                    st.subheader("🔍 Root Cause Analysis")
+                    st.success(rca_text)
+
+                # --- CATEGORY COMMENTARY CARD (BELOW RCA) ---
+                if comm_text:
+                    st.markdown("<br>", unsafe_allow_html=True)
+                    st.subheader("💡 Category Commentary")
+                    st.info(comm_text)
 
                 # --- FEEDBACK MODULE ---
                 st.markdown("---")
@@ -501,6 +552,7 @@ with tab1:
                     total_variance=total_var,
                     exec_summary=exec_summary,
                     rca_text=rca_text,
+                    comm_text=comm_text,
                     tree_data=result.get("tree_data", [])
                 )
                 
