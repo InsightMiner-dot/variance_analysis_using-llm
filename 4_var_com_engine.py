@@ -30,9 +30,9 @@ load_dotenv()
 # ==========================================
 def clean_markdown_for_ppt(text: str) -> str:
     """Removes LLM markdown artifacts (**, *, #) for clean PowerPoint text."""
-    text = re.sub(r'\*\*(.*?)\*\*', r'\1', text) # Remove bold
-    text = re.sub(r'\*(.*?)\*', r'\1', text) # Remove italics
-    text = re.sub(r'#(.*?)\n', r'\1\n', text) # Remove Headers
+    text = re.sub(r'\*\*(.*?)\*\*', r'\1', text) 
+    text = re.sub(r'\*(.*?)\*', r'\1', text) 
+    text = re.sub(r'#(.*?)\n', r'\1\n', text) 
     return text.strip()
 
 # ==========================================
@@ -126,17 +126,13 @@ def load_and_cache_data(file_bytes, file_name, sheet_name=None):
         return pd.read_csv(file_buffer)
 
 def add_corporate_header(slide, title_text: str, primary_color: RGBColor, accent_color: RGBColor):
-    """Helper to draw professional headers on slides."""
-    # Header Text
     header = slide.shapes.add_textbox(Inches(0.5), Inches(0.4), Inches(9), Inches(1))
-    hf = header.text_frame
-    hp = hf.paragraphs[0]
+    hp = header.text_frame.paragraphs[0]
     hp.text = title_text
     hp.font.size = Pt(28)
     hp.font.bold = True
     hp.font.color.rgb = primary_color
     
-    # Elegant Underline
     line = slide.shapes.add_connector(MSO_CONNECTOR.STRAIGHT, Inches(0.5), Inches(1.1), Inches(9.5), Inches(1.1))
     line.line.color.rgb = accent_color
     line.line.width = Pt(2)
@@ -144,27 +140,25 @@ def add_corporate_header(slide, title_text: str, primary_color: RGBColor, accent
 def generate_ppt_deck(total_variance: str, summary: str, tree_data: List[Dict[str, Any]]) -> io.BytesIO:
     prs = Presentation()
     
-    # Corporate Colors (Slate & Dark Blue)
-    primary_color = RGBColor(14, 43, 92)   # Deep Blue
-    accent_color = RGBColor(0, 163, 224)   # Vivid Cyan
-    text_color = RGBColor(89, 89, 89)      # Charcoal
+    primary_color = RGBColor(14, 43, 92)   
+    accent_color = RGBColor(0, 163, 224)   
+    text_color = RGBColor(89, 89, 89)      
     
-    blank_slide_layout = prs.slide_layouts[6] # Blank Layout for absolute control
+    blank_slide_layout = prs.slide_layouts[6] 
     
-    # ---------------------------------------------
-    # SLIDE 1: TITLE SLIDE
-    # ---------------------------------------------
+    # Extract the Root Cause Analysis to put it on its own slide
+    parts = re.split(r'Root\s+Cause\s+Analysis:', summary, flags=re.IGNORECASE)
+    exec_part = parts[0].replace('Executive Summary:', '').strip()
+    rca_part = parts[1].strip() if len(parts) > 1 else ""
+
+    # --- SLIDE 1: TITLE SLIDE ---
     slide1 = prs.slides.add_slide(blank_slide_layout)
-    
-    # Top decorative banner
     banner = slide1.shapes.add_shape(MSO_SHAPE.RECTANGLE, Inches(0), Inches(0), Inches(10), Inches(0.8))
     banner.fill.solid()
     banner.fill.fore_color.rgb = primary_color
     banner.line.color.rgb = primary_color
     
-    # Main Title
-    txBox = slide1.shapes.add_textbox(Inches(1), Inches(2.5), Inches(8), Inches(2))
-    tf = txBox.text_frame
+    tf = slide1.shapes.add_textbox(Inches(1), Inches(2.5), Inches(8), Inches(2)).text_frame
     p = tf.paragraphs[0]
     p.text = "Variance Analysis & Root Cause Report"
     p.font.size = Pt(36)
@@ -172,69 +166,74 @@ def generate_ppt_deck(total_variance: str, summary: str, tree_data: List[Dict[st
     p.font.color.rgb = primary_color
     p.alignment = PP_ALIGN.CENTER
     
-    # Subtitle
     p2 = tf.add_paragraph()
     p2.text = f"Total Impact: {total_variance}\nReport Date: {datetime.now().strftime('%B %d, %Y')}"
     p2.font.size = Pt(18)
     p2.font.color.rgb = text_color
     p2.alignment = PP_ALIGN.CENTER
 
-    # ---------------------------------------------
-    # SLIDE 2: EXECUTIVE SUMMARY
-    # ---------------------------------------------
+    # --- SLIDE 2: EXECUTIVE SUMMARY ---
     slide2 = prs.slides.add_slide(blank_slide_layout)
     add_corporate_header(slide2, "Executive Summary", primary_color, accent_color)
     
-    # Summary Content Box
-    content_box = slide2.shapes.add_textbox(Inches(0.5), Inches(1.4), Inches(9), Inches(5.5))
-    cf = content_box.text_frame
+    cf = slide2.shapes.add_textbox(Inches(0.5), Inches(1.4), Inches(9), Inches(5.5)).text_frame
     cf.word_wrap = True
     
-    clean_summary = clean_markdown_for_ppt(summary)
+    clean_summary = clean_markdown_for_ppt(exec_part)
+    lines = [line.strip() for line in clean_summary.split('\n') if line.strip()]
     
-    for idx, para in enumerate(clean_summary.split('\n')):
-        clean_para = para.strip()
-        if clean_para:
-            p = cf.paragraphs[0] if idx == 0 else cf.add_paragraph()
-            
-            # Detect if it is a bullet point from the LLM
-            if clean_para.startswith('-') or clean_para.startswith('*') or (len(clean_para) > 1 and clean_para[1] == '.'):
-                # Clean the prefix and set indent
-                p.text = clean_para.lstrip('-*1234567890. ')
-                p.level = 1
-                p.font.size = Pt(14)
-            else:
-                p.text = clean_para
-                p.level = 0
-                p.font.size = Pt(16)
-                p.font.bold = (idx == 0) # Bold the opening conclusion statement
-                
+    for idx, para in enumerate(lines):
+        p = cf.paragraphs[0] if idx == 0 else cf.add_paragraph()
+        
+        is_bullet = para.startswith('-') or para.startswith('*') or (len(para) > 1 and para[1] == '.')
+        clean_text = para.lstrip('-*1234567890. ')
+        
+        if is_bullet:
+            p.text = f"  •  {clean_text}" # Render proper bullet
+            p.font.size = Pt(14)
+            p.font.bold = False
             p.font.color.rgb = text_color
+        else:
+            p.text = clean_text
+            p.font.size = Pt(16)
+            p.font.bold = True # Bold for headers and primary categories
+            p.font.color.rgb = primary_color
 
-    # ---------------------------------------------
-    # SLIDE 3: PRIMARY DRIVERS BREAKDOWN
-    # ---------------------------------------------
+    # --- SLIDE 3: PRIMARY DRIVERS BREAKDOWN (TREE) ---
     slide3 = prs.slides.add_slide(blank_slide_layout)
-    add_corporate_header(slide3, "Primary Variance Drivers", primary_color, accent_color)
+    add_corporate_header(slide3, "Recursive Drill-Down Drivers", primary_color, accent_color)
     
-    df_box = slide3.shapes.add_textbox(Inches(0.5), Inches(1.4), Inches(9), Inches(5.5))
-    df_frame = df_box.text_frame
+    df_frame = slide3.shapes.add_textbox(Inches(0.5), Inches(1.4), Inches(9), Inches(5.5)).text_frame
     df_frame.word_wrap = True
     
-    for node in tree_data:
-        p = df_frame.paragraphs[0] if node == tree_data[0] else df_frame.add_paragraph()
+    for idx, node in enumerate(tree_data):
+        p = df_frame.paragraphs[0] if idx == 0 else df_frame.add_paragraph()
         p.text = f"{node['item']} (Impact: {node['value_display']})"
         p.font.bold = True
         p.font.size = Pt(16)
         p.font.color.rgb = primary_color
-        p.level = 0
         
-        for child in node.get('children', [])[:4]: # Limit to top 4 subs to prevent overflow
+        for child in node.get('children', [])[:4]: 
             p_sub = df_frame.add_paragraph()
-            p_sub.text = f"{child['column']} - {child['item']} ({child['value_display']})"
+            p_sub.text = f"  •  {child['column']} - {child['item']} ({child['value_display']})"
             p_sub.font.size = Pt(14)
+            p_sub.font.bold = False
             p_sub.font.color.rgb = text_color
-            p_sub.level = 1
+
+    # --- SLIDE 4: ROOT CAUSE ANALYSIS ---
+    if rca_part:
+        slide4 = prs.slides.add_slide(blank_slide_layout)
+        add_corporate_header(slide4, "Root Cause Analysis", primary_color, accent_color)
+        
+        rca_frame = slide4.shapes.add_textbox(Inches(0.5), Inches(1.4), Inches(9), Inches(5.5)).text_frame
+        rca_frame.word_wrap = True
+        
+        clean_rca = clean_markdown_for_ppt(rca_part)
+        p = rca_frame.paragraphs[0]
+        p.text = clean_rca
+        p.font.size = Pt(16)
+        p.font.bold = False
+        p.font.color.rgb = text_color
 
     ppt_stream = io.BytesIO()
     prs.save(ppt_stream)
@@ -320,16 +319,25 @@ def calculate_variance_node(state: AgentState) -> Dict[str, Any]:
 
 def synthesize_insight_node(state: AgentState) -> Dict[str, Any]:
     if state["path_trace"] and "Error:" in state["path_trace"][0]: return {"final_summary": "Analysis aborted."}
+    
+    # REVERTED: Using standard .env API Key auth
     llm = AzureChatOpenAI(
         azure_endpoint=os.getenv("AZURE_OPENAI_ENDPOINT"),
         api_key=os.getenv("AZURE_OPENAI_KEY"),
         azure_deployment=os.getenv("AZURE_OPENAI_DEPLOYMENT"),
         api_version=os.getenv("AZURE_OPENAI_API_VERSION"),
     )
+    
     system_prompt = (
-        "You are a strict, professional financial data analyst. Provide an Executive Summary formatted EXACTLY as follows:\n"
-        "1. A brief 1-2 sentence overall conclusion regarding the total variance.\n"
-        "2. A bulleted breakdown for each 'Primary Category' analyzed. Under each, list the Top 5 reasons/drivers provided, along with exact variance amounts.\n"
+        "You are a strict, professional financial data analyst. Review the provided variance data and generate a report formatted EXACTLY as follows:\n\n"
+        "Executive Summary:\n"
+        "[1-2 sentence overall conclusion regarding the total variance.]\n\n"
+        "Primary Categories:\n"
+        "[Name of Category 1]\n"
+        "- [Driver 1 with exact variance amount]\n"
+        "- [Driver 2 with exact variance amount]\n\n"
+        "Root Cause Analysis:\n"
+        "[Provide a detailed 4 to 5 line analytical paragraph explaining the underlying root causes of the variance based strictly on the provided data.]\n\n"
         "Do not add conversational filler."
     )
     messages = [SystemMessage(content=system_prompt), HumanMessage(content=f"Filtered Final Level Data:\n{chr(10).join(state['final_level_data'])}")]
@@ -364,7 +372,6 @@ def count_leaf_nodes(nodes: List[Dict[str, Any]]) -> int:
 # ==========================================
 st.set_page_config(page_title="Branched Variance Analyzer", layout="wide")
 
-# Initialize session state variables
 if "analysis_result" not in st.session_state: st.session_state.analysis_result = None
 if "current_hierarchy" not in st.session_state: st.session_state.current_hierarchy = None
 if "current_run_id" not in st.session_state: st.session_state.current_run_id = None
@@ -433,13 +440,11 @@ with tab1:
             else:
                 with st.spinner("Executing recursive drill-down analysis..."):
                     st.session_state.run_feedback_submitted = False 
-                    
                     app_graph = build_graph()
                     inputs = {
                         "df": df, "hierarchy_cols": hierarchy, "has_variance_col": has_variance_col,
                         "variance_col": variance_col, "base_scenario": base_scenario, "compare_scenario": compare_scenario,
                     }
-                    
                     st.session_state.analysis_result = app_graph.invoke(inputs)
                     st.session_state.current_hierarchy = hierarchy
                     
@@ -465,14 +470,14 @@ with tab1:
                 st.markdown("<br>", unsafe_allow_html=True)
                 col_left, col_right = st.columns(2)
                 with col_left:
-                    st.subheader("Executive Summary")
+                    st.subheader("AI Analysis Report")
                     st.info(result["final_summary"])
                 with col_right:
                     st.subheader("Recursive Drill-Down Trace")
                     st.caption(result["path_trace"][0])
                     render_trace_tree(result.get("tree_data", []))
 
-                # --- FEEDBACK MODULE (Now positioned above Export) ---
+                # --- FEEDBACK MODULE ---
                 st.markdown("---")
                 if st.session_state.current_run_id:
                     if st.session_state.run_feedback_submitted:
@@ -483,7 +488,7 @@ with tab1:
                         col_f1.button("👍", key="run_up", on_click=handle_run_feedback_click, args=(st.session_state.current_run_id, 1))
                         col_f2.button("👎", key="run_down", on_click=handle_run_feedback_click, args=(st.session_state.current_run_id, -1))
 
-                # --- POWERPOINT EXPORT BUTTON (Small column width) ---
+                # --- POWERPOINT EXPORT BUTTON ---
                 st.markdown("<br>", unsafe_allow_html=True)
                 st.subheader("Export Results")
                 
@@ -493,7 +498,6 @@ with tab1:
                     tree_data=result.get("tree_data", [])
                 )
                 
-                # Wrapping in a column to make the button smaller
                 col_dl1, col_dl2 = st.columns([1, 2])
                 with col_dl1:
                     st.download_button(
@@ -530,6 +534,7 @@ with tab2:
             with st.chat_message("assistant"):
                 st_callback = StreamlitCallbackHandler(st.container())
                 try:
+                    # REVERTED: Using standard .env API Key auth
                     llm_chat = AzureChatOpenAI(
                         azure_endpoint=os.getenv("AZURE_OPENAI_ENDPOINT"),
                         api_key=os.getenv("AZURE_OPENAI_KEY"),
