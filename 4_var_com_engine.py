@@ -201,7 +201,7 @@ def render_trace_tree(nodes: List[Dict[str, Any]]) -> None:
 
 
 def render_app_shell() -> None:
-    """Apply professional page styling and header layout."""
+    """Apply minimal page styling and result card layout."""
     st.html(
         """
         <style>
@@ -210,70 +210,71 @@ def render_app_shell() -> None:
                 to { opacity: 1; transform: translateY(0); }
             }
 
-            .app-hero {
-                padding: 1.4rem 1.6rem 1.2rem 1.6rem;
-                border: 1px solid rgba(30, 41, 59, 0.10);
-                border-radius: 18px;
-                background: linear-gradient(135deg, #f8fafc 0%, #eef4ff 100%);
-                margin-bottom: 1.25rem;
-                animation: fadeSlideIn 0.45s ease-out;
-            }
-
-            .app-kicker {
-                color: #335c81;
-                font-size: 0.82rem;
-                font-weight: 700;
-                letter-spacing: 0.08em;
-                text-transform: uppercase;
-                margin-bottom: 0.45rem;
-            }
-
             .app-title {
                 color: #0f172a;
-                font-size: 2.3rem;
-                font-weight: 800;
-                line-height: 1.1;
-                margin: 0;
+                font-size: 1.75rem;
+                font-weight: 700;
+                line-height: 1.2;
+                margin: 0 0 0.35rem 0;
             }
 
             .app-subtitle {
                 color: #475569;
-                font-size: 1.05rem;
-                line-height: 1.65;
-                margin-top: 0.7rem;
-                max-width: 920px;
+                font-size: 0.98rem;
+                line-height: 1.55;
+                margin-bottom: 1rem;
+                max-width: 760px;
             }
 
             .section-title {
                 color: #0f172a;
-                font-size: 1.32rem;
-                font-weight: 750;
-                margin: 0.35rem 0 0.25rem 0;
+                font-size: 1.12rem;
+                font-weight: 700;
+                margin: 0.15rem 0 0.2rem 0;
             }
 
             .section-subtitle {
                 color: #64748b;
-                font-size: 0.96rem;
-                margin-bottom: 0.8rem;
+                font-size: 0.92rem;
+                margin-bottom: 0.55rem;
             }
 
             .block-card {
                 border: 1px solid rgba(30, 41, 59, 0.08);
-                border-radius: 16px;
-                padding: 0.9rem 1rem 0.35rem 1rem;
+                border-radius: 14px;
+                padding: 0.8rem 0.95rem 0.3rem 0.95rem;
                 background: #ffffff;
-                box-shadow: 0 10px 30px rgba(15, 23, 42, 0.04);
+                box-shadow: 0 8px 24px rgba(15, 23, 42, 0.05);
+                margin-bottom: 0.85rem;
+                animation: fadeSlideIn 0.45s ease-out;
+            }
+
+            .result-card {
+                border: 1px solid rgba(15, 23, 42, 0.08);
+                border-radius: 18px;
+                background: #ffffff;
+                box-shadow: 0 14px 34px rgba(15, 23, 42, 0.06);
+                padding: 1rem 1rem 0.9rem 1rem;
                 margin-bottom: 1rem;
                 animation: fadeSlideIn 0.45s ease-out;
             }
+
+            .result-card-title {
+                color: #0f172a;
+                font-size: 1.18rem;
+                font-weight: 750;
+                margin: 0 0 0.2rem 0;
+            }
+
+            .result-card-subtitle {
+                color: #64748b;
+                font-size: 0.92rem;
+                margin-bottom: 0.85rem;
+            }
         </style>
-        <div class="app-hero">
-            <div class="app-kicker">Variance Intelligence Workspace</div>
-            <h1 class="app-title">Branched Root Cause Analyzer</h1>
-            <div class="app-subtitle">
-                Upload your dataset, define the variance metric, and review a structured recursive drill-down
-                that connects top-level variance movements to their underlying drivers.
-            </div>
+        <div class="app-title">Branched Root Cause Analyzer</div>
+        <div class="app-subtitle">
+            Upload your dataset and review a structured variance drill-down with executive commentary.
         </div>
         """
     )
@@ -288,6 +289,20 @@ def render_section_header(title: str, subtitle: str) -> None:
         </div>
         """
     )
+
+
+def open_result_card(title: str, subtitle: str) -> None:
+    st.html(
+        f"""
+        <div class="result-card">
+            <div class="result-card-title">{title}</div>
+            <div class="result-card-subtitle">{subtitle}</div>
+        """
+    )
+
+
+def close_result_card() -> None:
+    st.html("</div>")
 
 
 # ==========================================
@@ -388,16 +403,18 @@ if uploaded_file is not None and "df" in locals():
                     col_left, col_right = st.columns(2)
 
                     with col_left:
-                        render_section_header(
+                        open_result_card(
                             "Executive Summary",
                             "AI-generated narrative summary based on the filtered final-level drill-down output.",
                         )
                         st.success(result["final_summary"])
+                        close_result_card()
 
                     with col_right:
-                        render_section_header(
+                        open_result_card(
                             "Recursive Drill-Down Trace",
                             "Expandable variance tree showing the major branches and their downstream drivers.",
                         )
                         st.info(result["path_trace"][0])
                         render_trace_tree(result.get("tree_data", []))
+                        close_result_card()
